@@ -189,6 +189,9 @@ FLASK_SECRET_KEY = SECRET_KEY  # Flask应用密钥
 PASSWORD_HASH_ROUNDS = get_config_value('security', 'password_hash_rounds', 3, int)
 SESSION_TIMEOUT = get_config_value('security', 'session_timeout', 3600, int)  # 1小时
 
+# 是否允许匿名访问（免密连接 NTRIP）
+ALLOW_ANONYMOUS = get_config_value('security', 'allow_anonymous', False, bool)
+
 # 默认管理员账户
 DEFAULT_ADMIN = {
     'username': get_config_value('admin', 'username', 'admin'),

@@ -9,6 +9,7 @@ import json
 import logging
 import psutil
 import re
+import configparser
 from datetime import datetime
 from functools import wraps
 from threading import Thread
@@ -292,6 +293,56 @@ class WebManager:
                 })
         
 
+        
+        @self.app.route('/api/settings/anonymous', methods=['GET'])
+        @self.require_login
+        def api_get_anonymous_setting():
+            """获取匿名访问（免密）设置"""
+            try:
+                return jsonify({
+                    'success': True,
+                    'enabled': config.ALLOW_ANONYMOUS
+                })
+            except Exception as e:
+                log_error(f"获取匿名访问设置失败: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+        
+        @self.app.route('/api/settings/anonymous', methods=['POST'])
+        @self.require_login
+        def api_set_anonymous_setting():
+            """设置匿名访问（免密）开关"""
+            try:
+                data = request.get_json()
+                if data is None or 'enabled' not in data:
+                    return jsonify({'success': False, 'error': 'Missing enabled field'}), 400
+                
+                enabled = bool(data.get('enabled', False))
+                
+                # 读取并更新配置文件
+                config_path = config.CONFIG_FILE
+                cfg = configparser.ConfigParser()
+                cfg.read(config_path, encoding='utf-8')
+                
+                if 'security' not in cfg:
+                    cfg['security'] = {}
+                
+                cfg.set('security', 'allow_anonymous', 'true' if enabled else 'false')
+                
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    cfg.write(f)
+                
+                # 更新当前运行时的配置值
+                config.ALLOW_ANONYMOUS = enabled
+                
+                log_system_event(f"匿名访问设置已更新: {'启用' if enabled else '禁用'}")
+                return jsonify({
+                    'success': True,
+                    'message': f"Anonymous access {'enabled' if enabled else 'disabled'}",
+                    'enabled': enabled
+                })
+            except Exception as e:
+                log_error(f"更新匿名访问设置失败: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
         
         @self.app.route('/api/system/restart', methods=['POST'])
         @self.require_login

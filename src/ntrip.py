@@ -574,6 +574,12 @@ class NTRIPHandler:
             mount_name = mount.lstrip('/')
             self.mount = mount_name
             
+            # 如果全局允许匿名访问，跳过认证
+            if config.ALLOW_ANONYMOUS:
+                self.username = f"anonymous_{mount_name}"
+                logger.log_info(f"匿名访问已启用，跳过认证: {self.client_address} -> {mount_name}")
+                return True, "Anonymous access enabled"
+            
             if self.protocol_type == "ntrip1_0":
                 
                 if auth_header.startswith('Basic '):

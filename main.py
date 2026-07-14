@@ -91,10 +91,17 @@ def check_environment():
     def check_port(port, name):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                # 在 Windows 上必须设置 SO_REUSEADDR，否则端口可能因 TIME_WAIT 状态或快速重启而被误判为占用
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind(('', port))
             return True
-        except OSError:
-            logger.error(f"{name}端口 {port} 已被占用")
+        except PermissionError as e:
+            logger.error(f"{name}端口 {port} 无法绑定: {e}")
+            logger.error(f"  可能原因：该端口被 Windows 系统保留/排除（如 Hyper-V、WSL2、Docker Desktop 预留范围），或被防火墙/安全软件拦截")
+            logger.error(f"  解决方法：在 config.ini 中换一个不在系统排除范围内的端口（如 8080、8090、9000 等）")
+            return False
+        except OSError as e:
+            logger.error(f"{name}端口 {port} 已被占用或不可用: {e}")
             return False
     
     ports_ok = True

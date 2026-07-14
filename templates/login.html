@@ -1,8 +1,9 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Login - 2RTK Ntrip Caster</title>
+    <title>登录 - 2RTK Ntrip Caster</title>
     <meta charset="utf-8">
+    <link rel="shortcut icon" href="/static/favicon.ico" type="image/x-icon">
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -94,8 +95,8 @@
     <div class="login-container">
         <div class="logo">
             <h1>2RTK Ntrip Caster</h1>
-            <p id="loginMessage">Administrator Login</p>
-            <p id="defaultCredentials" style="color: #1e40af; font-size: 12px; margin-top: 10px; margin-bottom: 0;">Default credentials: admin/admin123. Please change in Settings for production use.</p>
+            <p id="loginMessage">管理员登录</p>
+            <p id="defaultCredentials" style="color: #1e40af; font-size: 12px; margin-top: 10px; margin-bottom: 0;">默认账号：admin/admin123。生产环境请到系统设置中修改。</p>
         </div>
         
         {% if error %}
@@ -104,18 +105,18 @@
         
         <form method="post" id="loginForm" onsubmit="return validateLoginForm(event)">
             <div class="form-group">
-                <label>Username:</label>
+                <label>用户名：</label>
                 <input type="text" name="username" id="username" required maxlength="50" 
                        oninput="validateUsername()">
                 <div id="usernameError" class="validation-error"></div>
             </div>
             <div class="form-group">
-                <label>Password:</label>
+                <label>密码：</label>
                 <input type="password" name="password" id="password" required maxlength="100" 
                        oninput="validatePassword()">
                 <div id="passwordError" class="validation-error"></div>
             </div>
-            <button type="submit" class="btn" id="loginBtn">Login</button>
+                <button type="submit" class="btn" id="loginBtn">登录</button>
         </form>
     </div>
     
@@ -130,12 +131,12 @@
             
             if (redirectPage) {
                 const pageNames = {
-                    'users': 'User Management',
-                    'mounts': 'Mount Point Management',
-                    'settings': 'System Settings'
+                    'users': '用户管理',
+                    'mounts': '挂载点管理',
+                    'settings': '系统设置'
                 };
-                const pageName = pageNames[redirectPage] || 'Management Function';
-                messageElement.textContent = `Access to ${pageName} requires administrator account login, please login`;
+                const pageName = pageNames[redirectPage] || '管理功能';
+                messageElement.textContent = `访问 ${pageName} 需要管理员账号登录，请先登录`;
             }
         });
         
@@ -153,13 +154,13 @@
             
             if (value.length < 3) {
                 input.classList.add('field-error');
-                error.textContent = 'Username must be at least 3 characters';
+                error.textContent = '用户名至少需要 3 个字符';
                 return false;
             }
             
             if (value.length > 50) {
                 input.classList.add('field-error');
-                error.textContent = 'Username cannot exceed 50 characters';
+                error.textContent = '用户名不能超过 50 个字符';
                 return false;
             }
             
@@ -167,7 +168,7 @@
             for (let char of invalidChars) {
                 if (value.includes(char)) {
                     input.classList.add('field-error');
-                    error.textContent = 'Username contains invalid characters';
+                    error.textContent = '用户名包含非法字符';
                     return false;
                 }
             }
@@ -189,13 +190,13 @@
             
             if (value.length < 6) {
                 input.classList.add('field-error');
-                error.textContent = 'Password must be at least 6 characters';
+                error.textContent = '密码至少需要 6 个字符';
                 return false;
             }
             
             if (value.length > 100) {
                 input.classList.add('field-error');
-                error.textContent = 'Password cannot exceed 100 characters';
+                error.textContent = '密码不能超过 100 个字符';
                 return false;
             }
             
@@ -220,12 +221,12 @@
             isSubmitting = true;
             const submitBtn = document.getElementById('loginBtn');
             submitBtn.disabled = true;
-            submitBtn.textContent = 'Logging in...';
+            submitBtn.textContent = '登录中...';
             
             setTimeout(() => {
                 isSubmitting = false;
                 submitBtn.disabled = false;
-                submitBtn.textContent = 'Login';
+                submitBtn.textContent = '登录';
             }, 5000);
             
             return true;

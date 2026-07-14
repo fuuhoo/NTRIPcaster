@@ -50,11 +50,11 @@ function updateConnectionStatus() {
     const statusElement = document.getElementById('connection-status');
     if (statusElement) {
         const statusText = {
-        'connecting': 'Connecting...',
-        'connected': 'Connected',
-        'disconnected': 'Disconnected',
-        'reconnecting': 'Reconnecting...',
-        'failed': 'Connection Failed'
+        'connecting': '连接中...',
+        'connected': '已连接',
+        'disconnected': '已断开',
+        'reconnecting': '重连中...',
+        'failed': '连接失败'
     };
         const statusColor = {
             'connecting': '#ffd93d',
@@ -63,7 +63,7 @@ function updateConnectionStatus() {
             'reconnecting': '#ffd93d',
             'failed': '#ff6b6b'
         };
-        statusElement.textContent = statusText[connectionStatus] || 'Unknown Status';
+        statusElement.textContent = statusText[connectionStatus] || '未知状态';
         statusElement.style.color = statusColor[connectionStatus] || '#adb5bd';
     }
 }
@@ -130,13 +130,13 @@ async function checkLoginStatus() {
     try {
         const response = await fetch('/api/users');
         if (response.status === 401) {
-            showAlert('Login expired, please log in again', 'warning');
+            showAlert('登录已过期，请重新登录', 'warning');
             window.location.href = '/login';
             return false;
         }
         return true;
     } catch (error) {
-        // console.error('Failed to check login status:', error);
+        // console.error('检查登录状态失败:', error);
         return false;
     }
 }
@@ -145,14 +145,14 @@ async function checkLoginStatus() {
 async function handleApiResponse(response, skipAuthRedirect = false) {
     if (response.status === 401) {
         if (!skipAuthRedirect) {
-            showAlert('Login expired, please log in again', 'warning');
+            showAlert('登录已过期，请重新登录', 'warning');
             window.location.href = '/login';
         }
         throw new Error('Unauthorized access');
     }
     
     if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        const errorData = await response.json().catch(() => ({ error: '未知错误' }));
         throw new Error(errorData.error || `HTTP ${response.status}`);
     }
     
@@ -183,6 +183,7 @@ async function loadPageContent(page) {
                 const users = await handleApiResponse(response);
                 // /api/users API already contains correct online status information, use directly
                 contentDiv.innerHTML = getUsersContent(users);
+                loadAnonymousSetting();
                 break;
             case 'mounts':
                 // Ensure content panel is displayed on non-dashboard pages
@@ -191,6 +192,7 @@ async function loadPageContent(page) {
                 const mounts = await handleApiResponse(response);
                 // /api/mounts API already contains correct online status and connection count information, use directly
                 contentDiv.innerHTML = getMountsContent(mounts);
+                loadAnonymousSetting();
                 break;
             case 'monitor':
                 // Ensure content panel is displayed on non-dashboard pages
@@ -214,8 +216,8 @@ async function loadPageContent(page) {
                 break;
         }
     } catch (error) {
-        // console.error('Failed to load page content:', error);
-        contentDiv.innerHTML = '<div class="error-message">Failed to load page content, please try again later.</div>';
+        // console.error('加载页面内容失败:', error);
+        contentDiv.innerHTML = '<div class="error-message">页面加载失败，请稍后重试。</div>';
     }
 }
 
@@ -234,7 +236,7 @@ function addInfoButtonsToSTRItems() {
             return;
         }
         
-        button.title = `View real-time RTCM parsing for ${mountName}`;
+        button.title = `查看挂载点 ${mountName} 的实时 RTCM 解析数据`;
         
         button.addEventListener('click', () => {
             // Start RTCM parsing and update container content
@@ -316,13 +318,13 @@ function startRTCMParsing(mountName) {
                 .catch(error => console.warn(`[前端] 获取启动后状态失败:`, error));
             }, 1000);
         } else {
-            console.error(`[前端] RTCM解析启动失败: ${data.error || 'Unknown error'}`);
-            showAlert(`Failed to start RTCM parsing: ${data.error || 'Unknown error'}`, 'error');
+            console.error(`[前端] RTCM解析启动失败: ${data.error || '未知错误'}`);
+            showAlert(`启动 RTCM 解析失败：${data.error || '未知错误'}`, 'error');
         }
     })
     .catch(error => {
         console.error('[前端] 调用RTCM解析API失败:', error);
-        showAlert('Failed to call RTCM parsing API', 'error');
+        showAlert('调用 RTCM 解析接口失败', 'error');
     });
 }
 
@@ -431,12 +433,12 @@ function updateStationInfo(mountName) {
     const stationInfoDiv = document.getElementById('station-info');
     stationInfoDiv.innerHTML = `
         <div class="station-info-loading">
-            <p>Parsing RTCM data for ${mountName}...</p>
+            <p>正在解析挂载点 ${mountName} 的 RTCM 数据...</p>
             <div class="loading-spinner"></div>
         </div>
     `;
     
-    // Base station information is now displayed through simulated data
+    // 基准站信息通过实时数据展示
 }
 
 // Display base station information
@@ -447,40 +449,40 @@ function displayStationInfo(stationData) {
             <!-- 第一行：基本信息 -->
             <div class="info-row-group">
                 <div class="info-row">
-                    <span class="info-label">Mount Point:</span>
-                    <span class="info-value" id="station-name">${stationData.name || 'Unknown'}</span>
+                    <span class="info-label">挂载点：</span>
+                    <span class="info-value" id="station-name">${stationData.name || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Station ID:</span>
-                    <span class="info-value" id="station-id">${stationData.id || 'Unknown'}</span>
+                    <span class="info-label">基准站 ID：</span>
+                    <span class="info-value" id="station-id">${stationData.id || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Country:</span>
-                    <span class="info-value" id="station-country">${stationData.country_name || 'Unknown'}</span>
+                    <span class="info-label">国家：</span>
+                    <span class="info-value" id="station-country">${stationData.country_name || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">City:</span>
-                    <span class="info-value" id="station-city">${stationData.city || 'Unknown'}</span>
+                    <span class="info-label">城市：</span>
+                    <span class="info-value" id="station-city">${stationData.city || '未知'}</span>
                 </div>
             </div>
             
             <!-- 第二行：设备信息 -->
             <div class="info-row-group">
                 <div class="info-row">
-                    <span class="info-label">Receiver Type:</span>
-                    <span class="info-value" id="receiver-type">${stationData.receiver?.name || 'Unknown'}</span>
+                    <span class="info-label">接收机类型：</span>
+                    <span class="info-value" id="receiver-type">${stationData.receiver?.name || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Receiver Firmware:</span>
-                    <span class="info-value" id="receiver-version">${stationData.receiver?.firmware || 'Unknown'}</span>
+                    <span class="info-label">接收机固件：</span>
+                    <span class="info-value" id="receiver-version">${stationData.receiver?.firmware || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Antenna Type:</span>
-                    <span class="info-value" id="antenna-type">${stationData.antenna?.name || 'Unknown'}</span>
+                    <span class="info-label">天线类型：</span>
+                    <span class="info-value" id="antenna-type">${stationData.antenna?.name || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Antenna Serial:</span>
-                    <span class="info-value" id="antenna-serial">${stationData.antenna?.serial || 'Unknown'}</span>
+                    <span class="info-label">天线序列号：</span>
+                    <span class="info-value" id="antenna-serial">${stationData.antenna?.serial || '未知'}</span>
                 </div>
             </div>
             
@@ -488,14 +490,14 @@ function displayStationInfo(stationData) {
             <div class="info-row-group coordinates-group">
                 <div class="coordinates-half">
                     <div class="info-row">
-                        <span class="info-label">Coordinates:</span>
-                        <span class="info-value">Longitude: <span id="station-longitude">${stationData.longitude || 0}</span>°, Latitude: <span id="station-latitude">${stationData.latitude || 0}</span>°, Height: <span id="station-height">${stationData.height || 'Unknown'}</span></span>
+                        <span class="info-label">坐标：</span>
+                        <span class="info-value">经度：<span id="station-longitude">${stationData.longitude || 0}</span>°，纬度：<span id="station-latitude">${stationData.latitude || 0}</span>°，高度：<span id="station-height">${stationData.height || '未知'}</span></span>
                     </div>
                 </div>
                 <div class="coordinates-half">
                     <div class="info-row">
-                        <span class="info-label">ECEF:</span>
-                        <span class="info-value" id="station-xyz">X: ${stationData.x || 0}, Y: ${stationData.y || 0}, Z: ${stationData.z || 0}</span>
+                        <span class="info-label">地心地固坐标：</span>
+                        <span class="info-value" id="station-xyz">X：${stationData.x || 0}，Y：${stationData.y || 0}，Z：${stationData.z || 0}</span>
                     </div>
                 </div>
             </div>
@@ -788,7 +790,7 @@ function updateMapLocation(latitude, longitude, mountName = null, isInitialMarki
         
         const markerFeature = new ol.Feature({
             geometry: new ol.geom.Point(center),
-            name: 'Base Station Location'
+            name: '基准站位置'
         });
         
         markerFeature.setStyle(new ol.style.Style({
@@ -815,7 +817,7 @@ function updateMapLocation(latitude, longitude, mountName = null, isInitialMarki
         if (mountName) {
             const textFeature = new ol.Feature({
                 geometry: new ol.geom.Point(center),
-                name: 'Mount Name Label'
+                name: '挂载点名称标签'
             });
             
             textFeature.setStyle(new ol.style.Style({
@@ -900,11 +902,11 @@ function getFrequencyInfo(constellation, channel) {
     
     const mappedConstellation = constellationMap[constellation];
     if (!mappedConstellation || !frequencyMap[mappedConstellation] || !channel) {
-        return { band: 'Unknown', freq: 'Unknown' };
+        return { band: '未知', freq: '未知' };
     }
     
     const freqInfo = frequencyMap[mappedConstellation][channel];
-    return freqInfo || { band: 'Unknown', freq: 'Unknown' };
+    return freqInfo || { band: '未知', freq: '未知' };
 }
 
 
@@ -1087,10 +1089,10 @@ function updateConstellationChart(constellation, satellites) {
 
 
 function getSignalColor(strength) {
-    if (strength >= 40) return '#4CAF50'; // 绿色 Green
-    if (strength >= 30) return '#FFC107'; // 黄色 Yellow
-    if (strength >= 20) return '#FF9800'; // 橙色 Orange 颜色好像不对~
-    return '#F44336'; // 红色 Red
+    if (strength >= 40) return '#4CAF50'; // 绿色
+    if (strength >= 30) return '#FFC107'; // 黄色
+    if (strength >= 20) return '#FF9800'; // 橙色
+    return '#F44336'; // 红色
 }
 
 let currentTooltip = null;
@@ -1114,12 +1116,12 @@ function showSatelliteTooltip(event, satellite, constellation) {
     tooltip.className = 'satellite-tooltip';
     tooltip.innerHTML = `
         <div><strong>${satellite.name}</strong></div>
-        <div>Signal Strength: ${satellite.signalStrength} dBHz</div>
-                    <div>Elevation: ${satellite.elevation}°</div>
-                    <div>Azimuth: ${satellite.azimuth}°</div>
-                    <div>Band: ${freqInfo.band}</div>
-                    <div>Frequency: ${freqInfo.freq}</div>
-                    <div>Channel: ${satellite.channel || 'Unknown'}</div>
+        <div>信号强度：${satellite.signalStrength} dBHz</div>
+                    <div>高度角：${satellite.elevation}°</div>
+                    <div>方位角：${satellite.azimuth}°</div>
+                    <div>频段：${freqInfo.band}</div>
+                    <div>频率：${freqInfo.freq}</div>
+                    <div>信道：${satellite.channel || '未知'}</div>
     `;
     
     tooltip.style.cssText = `
@@ -1188,8 +1190,8 @@ function hideSatelliteTooltip() {
 function getDashboardContent() {
     return `
         <div class="page-header">
-            <h3>System Status</h3>
-            <div class="dashboard-timestamp" id="dashboard-timestamp">Loading...</div>
+            <h3>系统状态</h3>
+            <div class="dashboard-timestamp" id="dashboard-timestamp">加载中...</div>
         </div>
         
         <!-- 系统概览卡片 -->
@@ -1197,7 +1199,7 @@ function getDashboardContent() {
             <div class="dashboard-card">
                 <div class="card-icon">⏰</div>
                 <div class="card-content">
-                    <div class="card-title">Uptime</div>
+                    <div class="card-title">运行时间</div>
                     <div class="card-value" id="system-uptime">-</div>
                 </div>
             </div>
@@ -1205,7 +1207,7 @@ function getDashboardContent() {
             <div class="dashboard-card">
                 <div class="card-icon">⚡</div>
                 <div class="card-content">
-                    <div class="card-title">CPU Usage</div>
+                    <div class="card-title">CPU 使用率</div>
                     <div class="card-value" id="system-cpu">-</div>
                 </div>
             </div>
@@ -1213,7 +1215,7 @@ function getDashboardContent() {
             <div class="dashboard-card">
                 <div class="card-icon">📈</div>
                 <div class="card-content">
-                    <div class="card-title">Memory Usage</div>
+                    <div class="card-title">内存使用率</div>
                     <div class="card-value" id="system-memory">-</div>
                     <div class="card-detail" id="system-memory-detail">-</div>
                 </div>
@@ -1222,7 +1224,7 @@ function getDashboardContent() {
             <div class="dashboard-card">
                 <div class="card-icon">📻</div>
                 <div class="card-content">
-                    <div class="card-title">Network Bandwidth</div>
+                    <div class="card-title">网络带宽</div>
                     <div class="card-value" id="system-bandwidth">-</div>
                 </div>
             </div>
@@ -1230,34 +1232,34 @@ function getDashboardContent() {
         
         <!-- 连接统计 -->
         <div class="dashboard-section">
-            <h4>Connection Statistics</h4>
+            <h4>连接统计</h4>
             <div class="stats-grid">
                 <div class="stat-item">
-                    <span class="stat-label">Active Connections:</span>
+                    <span class="stat-label">当前连接数：</span>
                     <span class="stat-value" id="active-connections">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Max Connections:</span>
+                    <span class="stat-label">最大连接数：</span>
                     <span class="stat-value" id="max-connections">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Total Connections:</span>
+                    <span class="stat-label">总连接数：</span>
                     <span class="stat-value" id="total-connections">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Rejected Connections:</span>
+                    <span class="stat-label">拒绝连接数：</span>
                     <span class="stat-value" id="rejected-connections">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Online Mount Points:</span>
+                    <span class="stat-label">在线挂载点：</span>
                     <span class="stat-value" id="total-mounts">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">User Connections:</span>
+                    <span class="stat-label">用户连接数：</span>
                     <span class="stat-value" id="total-users">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Data Transfer:</span>
+                    <span class="stat-label">数据传输量：</span>
                     <span class="stat-value" id="total-data">-</span>
                 </div>
             </div>
@@ -1265,9 +1267,9 @@ function getDashboardContent() {
         
         <!-- 挂载点详情 -->
         <div class="dashboard-section">
-            <h4>Mount Point Details</h4>
+            <h4>挂载点详情</h4>
             <div class="mounts-container" id="mounts-detail">
-                <div class="loading-text">Loading...</div>
+                <div class="loading-text">加载中...</div>
             </div>
         </div>
         
@@ -1442,8 +1444,8 @@ function getUsersContent(users) {
         //两种方式 API获取和socket推送 可以备用
         const isOnline = user.online !== undefined ? user.online : (window.onlineUsers && (user.username in window.onlineUsers));
         const statusHtml = isOnline ? 
-            '<span style="color: #28a745; font-weight: bold;">● Online</span>' : 
-            '<span style="color: #6c757d;">○ Offline</span>';
+            '<span style="color: #28a745; font-weight: bold;">● 在线</span>' : 
+            '<span style="color: #6c757d;">○ 离线</span>';
         return `
             <tr class="user-row" data-username="${user.username}">
                 <td>${user.username}</td>
@@ -1451,8 +1453,8 @@ function getUsersContent(users) {
                 <td>${user.connection_count || 0}</td>
                 <td>${user.connect_time || '-'}</td>
                 <td>
-                    <button class="btn btn-primary btn-sm edit-user-btn" data-username="${user.username}">Edit</button>
-                    <button class="btn btn-danger btn-sm delete-user-btn" data-username="${user.username}">Delete</button>
+                    <button class="btn btn-primary btn-sm edit-user-btn" data-username="${user.username}">编辑</button>
+                    <button class="btn btn-danger btn-sm delete-user-btn" data-username="${user.username}">删除</button>
                 </td>
             </tr>
         `;
@@ -1480,18 +1482,25 @@ function getUsersContent(users) {
     
     return `
         <div class="page-header">
-            <h3>User Management</h3>
-            <button onclick="showAddUserForm()" class="btn btn-primary">Add User</button>
+            <h3>用户管理</h3>
+            <button onclick="showAddUserForm()" class="btn btn-primary">添加用户</button>
+        </div>
+        <div class="anonymous-access-bar" style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 12px 15px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <input type="checkbox" id="anonymous-access" onchange="toggleAnonymousAccess()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
+            <label for="anonymous-access" style="margin: 0; cursor: pointer; font-weight: 500;">
+                允许匿名访问（连接 NTRIP 无需用户名/密码）
+            </label>
+            <span id="anonymous-status" style="font-size: 0.85em; color: #6c757d;"></span>
         </div>
         <div class="table-container">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>Username</th>
-                        <th>Status</th>
-                        <th>Connections</th>
-                        <th>Connect Time</th>
-                        <th>Actions</th>
+                        <th>用户名</th>
+                        <th>状态</th>
+                        <th>连接数</th>
+                        <th>接入时间</th>
+                        <th>操作</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1508,18 +1517,18 @@ function getMountsContent(mounts) {
         // 优先使用从API获取的在线状态，如果没有则使用WebSocket数据
         const isOnline = mount.active !== undefined ? mount.active : (window.onlineMounts && (mount.mount in window.onlineMounts));
         const statusHtml = isOnline ? 
-            '<span style="color: #28a745; font-weight: bold;">● Online</span>' : 
-            '<span style="color: #6c757d;">○ Offline</span>';
+            '<span style="color: #28a745; font-weight: bold;">● 在线</span>' : 
+            '<span style="color: #6c757d;">○ 离线</span>';
         return `
             <tr class="mount-row" data-mount="${mount.mount}">
                 <td>${mount.mount}</td>
                 <td class="mount-status">${statusHtml}</td>
                 <td>${mount.connections || 0}</td>
-                <td>${mount.username || 'Unspecified'}</td>
+                <td>${mount.username || '未指定'}</td>
                 <td>${mount.description || '-'}</td>
                 <td>
-                    <button onclick="editMount('${mount.mount}')" class="btn btn-primary btn-sm">Edit</button>
-                    <button onclick="deleteMount('${mount.mount}')" class="btn btn-danger btn-sm">Delete</button>
+                    <button onclick="editMount('${mount.mount}')" class="btn btn-primary btn-sm">编辑</button>
+                    <button onclick="deleteMount('${mount.mount}')" class="btn btn-danger btn-sm">删除</button>
                 </td>
             </tr>
         `;
@@ -1527,19 +1536,26 @@ function getMountsContent(mounts) {
     
     return `
         <div class="page-header">
-            <h3>Mount Point Management</h3>
-            <button onclick="showAddMountForm()" class="btn btn-primary">Add Mount Point</button>
+            <h3>挂载点管理</h3>
+            <button onclick="showAddMountForm()" class="btn btn-primary">添加挂载点</button>
+        </div>
+        <div class="anonymous-access-bar" style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 12px 15px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <input type="checkbox" id="anonymous-access" onchange="toggleAnonymousAccess()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
+            <label for="anonymous-access" style="margin: 0; cursor: pointer; font-weight: 500;">
+                允许匿名访问（连接 NTRIP 无需用户名/密码）
+            </label>
+            <span id="anonymous-status" style="font-size: 0.85em; color: #6c757d;"></span>
         </div>
         <div class="table-container">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>Mount Point</th>
-                        <th>Status</th>
-                        <th>Connections</th>
-                        <th>Owner</th>
-                        <th>Description</th>
-                        <th>Actions</th>
+                        <th>挂载点</th>
+                        <th>状态</th>
+                        <th>连接数</th>
+                        <th>所属用户</th>
+                        <th>描述</th>
+                        <th>操作</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1554,8 +1570,8 @@ function getMountsContent(mounts) {
 function getMonitorContent() {
     return `
         <div class="page-header">
-            <h3><i class="fas fa-satellite-dish"></i> Base Station STR Information</h3>
-            <p class="page-subtitle">Real-time monitoring of NTRIP data streams and base station status</p>
+            <h3><i class="fas fa-satellite-dish"></i> 基准站 STR 信息</h3>
+            <p class="page-subtitle">NTRIP 数据流与基准站状态实时监控</p>
         </div>
         
         <div class="monitor-dashboard">
@@ -1564,27 +1580,27 @@ function getMonitorContent() {
                 <!-- STR数据表 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
-                        <h4><i class="fas fa-table"></i> STR Data Table</h4>
+                        <h4><i class="fas fa-table"></i> STR 数据表</h4>
                     </div>
                     <div class="card-content" id="str-data">
-                        <p class="loading-text"><i class="fas fa-spinner fa-spin"></i> Loading STR table data...</p>
+                        <p class="loading-text"><i class="fas fa-spinner fa-spin"></i> 正在加载 STR 表数据...</p>
                     </div>
                 </div>
 
                 <!-- 基准站信息 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
-                        <h4><i class="fas fa-broadcast-tower"></i> Base Station Information</h4>
+                        <h4><i class="fas fa-broadcast-tower"></i> 基准站信息</h4>
                         <div class="card-status" id="station-status">
                             <span class="status-dot waiting"></span>
-                            <span>Waiting for selection</span>
+                            <span>等待选择</span>
                         </div>
                     </div>
                     <div class="card-content">
                         <div id="station-info" class="station-info-container">
                             <div class="empty-state">
                                 <i class="fas fa-mouse-pointer"></i>
-                                <p>Please click the INFO button in the STR table to select a mount point</p>
+                                <p>请点击 STR 表中的 INFO 按钮选择挂载点</p>
                             </div>
                         </div>
                     </div>
@@ -1593,14 +1609,14 @@ function getMonitorContent() {
                 <!-- 基准站位置 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
-                        <h4><i class="fas fa-map-marker-alt"></i> Base Station Location</h4>
+                        <h4><i class="fas fa-map-marker-alt"></i> 基准站位置</h4>
                     </div>
                     <div class="card-content map-content">
                         <div id="map-container" class="map-container">
                             <div id="map" class="map-display"></div>
                             <div class="map-overlay" id="map-loading">
                                 <i class="fas fa-map"></i>
-                                <p>Waiting for location data...</p>
+                                <p>等待位置数据...</p>
                             </div>
                             <div id="map-switch" class="map-switch-floating">
                                 <button id="amap-btn" class="btn btn-sm btn-primary">高德地图</button>
@@ -1613,17 +1629,17 @@ function getMonitorContent() {
                 <!-- 卫星数据可视化 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
-                        <h4><i class="fas fa-satellite"></i> Satellite Data Visualization</h4>
+                        <h4><i class="fas fa-satellite"></i> 卫星数据可视化</h4>
                         <div class="card-status" id="satellite-status">
                             <span class="status-dot waiting"></span>
-                            <span>Waiting for data</span>
+                            <span>等待数据</span>
                         </div>
                     </div>
                     <div class="card-content">
                         <div id="satellite-container" class="satellite-container">
                             <div class="empty-state">
                                 <i class="fas fa-satellite-dish"></i>
-                                <p>Waiting for satellite data...</p>
+                                <p>等待卫星数据...</p>
                             </div>
                         </div>
                     </div>
@@ -1637,28 +1653,77 @@ function getMonitorContent() {
 function getSettingsContent() {
     return `
         <div class="page-header">
-            <h3>System Settings</h3>
+            <h3>系统设置</h3>
         </div>
         <div class="settings-container">
             <div class="settings-section">
-                <h4>Security Settings</h4>
+                <h4>安全设置</h4>
                 <div class="form-group">
-                    <label for="admin-password">New Password:</label>
-                    <input type="password" id="admin-password" placeholder="Enter new password" class="form-control">
+                    <label for="admin-password">新密码：</label>
+                    <input type="password" id="admin-password" placeholder="请输入新密码" class="form-control">
                 </div>
                 <div class="form-group">
-                    <label for="confirm-password">Confirm Password:</label>
-                    <input type="password" id="confirm-password" placeholder="Enter password again" class="form-control">
+                    <label for="confirm-password">确认密码：</label>
+                    <input type="password" id="confirm-password" placeholder="请再次输入密码" class="form-control">
                 </div>
-                <button onclick="changePassword()" class="btn btn-primary">Change Admin Password</button>
+                <button onclick="changePassword()" class="btn btn-primary">修改管理员密码</button>
             </div>
 
             <div class="settings-section">
-                <h4>System Control</h4>
-                <button onclick="restartProgram()" class="btn btn-warning" style="background-color: #f39c12; border-color: #f39c12;">Restart Program</button>
+                <h4>系统控制</h4>
+                <button onclick="restartProgram()" class="btn btn-warning" style="background-color: #f39c12; border-color: #f39c12;">重启程序</button>
             </div>
         </div>
     `;
+}
+
+async function loadAnonymousSetting() {
+    try {
+        const response = await fetch('/api/settings/anonymous');
+        const result = await handleApiResponse(response);
+        const checkbox = document.getElementById('anonymous-access');
+        const status = document.getElementById('anonymous-status');
+        if (checkbox && result.success) {
+            checkbox.checked = result.enabled;
+        }
+        if (status) {
+            status.textContent = result.enabled ? '（已开启）' : '（已关闭）';
+        }
+    } catch (error) {
+        if (error.message !== 'Unauthorized access') {
+            // console.error('加载匿名访问设置失败:', error);
+        }
+    }
+}
+
+async function toggleAnonymousAccess() {
+    const checkbox = document.getElementById('anonymous-access');
+    const status = document.getElementById('anonymous-status');
+    if (!checkbox) return;
+
+    const enabled = checkbox.checked;
+    try {
+        const response = await fetch('/api/settings/anonymous', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enabled })
+        });
+        const result = await handleApiResponse(response);
+        if (result.success) {
+            showAlert(`匿名访问已${result.enabled ? '开启' : '关闭'}`, 'success');
+            if (status) {
+                status.textContent = result.enabled ? '（已开启）' : '（已关闭）';
+            }
+        } else {
+            showAlert('更新失败：' + (result.error || '未知错误'), 'error');
+            checkbox.checked = !enabled;
+        }
+    } catch (error) {
+        if (error.message !== 'Unauthorized access') {
+            showAlert('匿名访问更新失败：' + error.message, 'error');
+        }
+        checkbox.checked = !enabled;
+    }
 }
 
 // Socket.IO
@@ -1767,10 +1832,10 @@ socket.on('rtcm_realtime_data', function(data) {
                         
                         
                         const rtcmSatellites = data.sats.map(sat => ({
-                            name: sat.id || sat.prn || 'Unknown',
+                            name: sat.id || sat.prn || '未知',
                             signalStrength: sat.snr || sat.signal_strength || 0,
                             frequency: sat.frequency || 0,
-                            channel: sat.signal_type || 'Unknown'
+                            channel: sat.signal_type || '未知'
                         }));
                         
                         
@@ -1818,18 +1883,18 @@ socket.on('rtcm_realtime_data', function(data) {
                     // 如果还是空状态，先创建基础结构
                     // console.log('[地理信息调试] 检测到empty-state，创建基础结构');
                     const stationData = {
-                        name: data.mount_name || data.mount || 'Unknown',
-                        id: data.station_id || 'Unknown',
-                        country: data.country || 'Unknown',
-                        city: data.city || 'Unknown',
+                        name: data.mount_name || data.mount || '未知',
+                        id: data.station_id || '未知',
+                        country: data.country || '未知',
+                        city: data.city || '未知',
                         latitude: data.lat || 0,
                         longitude: data.lon || 0,
-                        height: data.height || 'Unknown',
+                        height: data.height || '未知',
                         x: data.x || 0,
                         y: data.y || 0,
                         z: data.z || 0,
-                        receiver: { name: 'Unknown', firmware: 'Unknown' },
-                        antenna: { name: 'Unknown', serial: 'Unknown' }
+                        receiver: { name: '未知', firmware: '未知' },
+                        antenna: { name: '未知', serial: '未知' }
                     };
                     // console.log('[地理信息调试] 准备显示基准站信息:', stationData);
                     displayStationInfo(stationData);
@@ -1882,7 +1947,7 @@ socket.on('rtcm_realtime_data', function(data) {
                     // country
                     if (data.country || data.country_name) {
                         // console.log('[地理信息调试] 更新国家:', data.country_name || data.country);
-                        updateElement('station-country', data.country_name || 'Unknown');
+                        updateElement('station-country', data.country_name || '未知');
                     }
                     
                     // city
@@ -1952,7 +2017,7 @@ function updateSystemStats(stats) {
     if (!stats) return;
     
     const timestamp = new Date().toLocaleString('zh-CN');
-    updateElement('dashboard-timestamp', `Last Updated: ${timestamp}`);
+    updateElement('dashboard-timestamp', `最后更新：${timestamp}`);
     
     if (stats.uptime !== undefined) {
         updateElement('system-uptime', formatUptime(stats.uptime));
@@ -2043,12 +2108,12 @@ function updateMountDetails(mounts) {
     if (!container) return;
     
     if (!mounts || mounts.length === 0) {
-        container.innerHTML = '<div class="loading-text">No mount point data available</div>';
+        container.innerHTML = '<div class="loading-text">暂无挂载点数据</div>';
         return;
     }
     
     const mountsHtml = mounts.map(mount => {
-        const mountName = mount.mount_name || 'Unknown';
+        const mountName = mount.mount_name || '未知';
         const userCount = mount.user_count || 0;
         const dataCount = mount.data_count || 0;
         const uptime = mount.uptime || 0;
@@ -2061,8 +2126,8 @@ function updateMountDetails(mounts) {
             <div class="mount-item">
                 <div class="mount-name">${mountName}</div>
                 <div class="mount-stats">
-                    <div>👤 ${userCount} Users</div>
-            <div>📈 ${dataCount} Data Packets</div>
+                    <div>👤 ${userCount} 用户</div>
+            <div>📈 ${dataCount} 数据包</div>
                     <div>⏱️ ${uptimeStr}</div>
                     <div>⚙️ ${status}</div>
                 </div>
@@ -2083,13 +2148,13 @@ function formatUptime(seconds) {
     const secs = Math.floor(seconds % 60);
     
     if (days > 0) {
-        return `${days}d ${hours}h ${minutes}m`;
+        return `${days}天 ${hours}小时 ${minutes}分`;
     } else if (hours > 0) {
-        return `${hours}h ${minutes}m`;
+        return `${hours}小时 ${minutes}分`;
     } else if (minutes > 0) {
-        return `${minutes}m ${secs}s`;
+        return `${minutes}分 ${secs}秒`;
     } else {
-        return `${secs}s`;
+        return `${secs}秒`;
     }
 }
 
@@ -2105,8 +2170,8 @@ function updateOnlineStatus() {
                 if (window.onlineUsers) {
                     const isOnline = username in window.onlineUsers;
                     statusElement.innerHTML = isOnline ? 
-                        '<span style="color: #28a745; font-weight: bold;">● Online</span>' : 
-                        '<span style="color: #6c757d;">○ Offline</span>';
+                        '<span style="color: #28a745; font-weight: bold;">● 在线</span>' : 
+                        '<span style="color: #6c757d;">○ 离线</span>';
                 }
             }
         });
@@ -2123,8 +2188,8 @@ function updateOnlineStatus() {
                 if (window.onlineMounts) {
                     const isOnline = mountName in window.onlineMounts;
                     statusElement.innerHTML = isOnline ? 
-                        '<span style="color: #28a745; font-weight: bold;">● Online</span>' : 
-                        '<span style="color: #6c757d;">○ Offline</span>';
+                        '<span style="color: #28a745; font-weight: bold;">● 在线</span>' : 
+                        '<span style="color: #6c757d;">○ 离线</span>';
                 }
             }
         });
@@ -2161,15 +2226,15 @@ function updateMonitorData() {
         const strDataElement = document.getElementById('str-data');
         if (strDataElement) {
             if (Object.keys(window.strData).length === 0) {
-                strDataElement.innerHTML = '<div class="empty-state"><i class="fas fa-table"></i><p>No STR table data available</p></div>';
+                strDataElement.innerHTML = '<div class="empty-state"><i class="fas fa-table"></i><p>暂无 STR 表数据</p></div>';
             } else {
                 let strHtml = '';
                 Object.entries(window.strData).forEach(([mountName, strContent]) => {
                     strHtml += `
                         <div class="str-row">
-                            <button class="str-info-btn" data-mount="${mountName}">INFO</button>
+                            <button class="str-info-btn" data-mount="${mountName}">信息</button>
                             <div class="str-content-wrapper">
-                                <div class="str-content-inline">${strContent || 'No data available'}</div>
+                                <div class="str-content-inline">${strContent || '暂无数据'}</div>
                             </div>
                         </div>
                     `;
@@ -2187,7 +2252,7 @@ function updateMonitorData() {
 function refreshSTRData() {
     const strContainer = document.getElementById('str-data');
     if (strContainer) {
-        strContainer.innerHTML = '<p class="loading-text"><i class="fas fa-spinner fa-spin"></i> Refreshing STR table data...</p>';
+        strContainer.innerHTML = '<p class="loading-text"><i class="fas fa-spinner fa-spin"></i> 正在刷新 STR 表数据...</p>';
     }
     
     
@@ -2201,7 +2266,7 @@ function updateMonitorStatus(systemStatus) {
     
     const connectionStatus = document.getElementById('connection-status-monitor');
     if (connectionStatus) {
-        connectionStatus.textContent = socket && socket.connected ? 'Connected' : 'Disconnected';
+        connectionStatus.textContent = socket && socket.connected ? '已连接' : '已断开';
     }
     
     
@@ -2226,10 +2291,10 @@ function updateStationStatus(hasData) {
         
         if (hasData) {
             statusDot.className = 'status-dot online';
-            statusText.textContent = 'Selected';
+            statusText.textContent = '已选择';
         } else {
             statusDot.className = 'status-dot waiting';
-            statusText.textContent = 'Waiting for selection';
+            statusText.textContent = '等待选择';
         }
     }
 }
@@ -2243,10 +2308,10 @@ function updateSatelliteStatus(hasData) {
         
         if (hasData) {
             statusDot.className = 'status-dot online';
-            statusText.textContent = 'Receiving';
+            statusText.textContent = '接收中';
         } else {
             statusDot.className = 'status-dot waiting';
-            statusText.textContent = 'Waiting for data';
+            statusText.textContent = '等待数据';
         }
     }
 }
@@ -2257,11 +2322,11 @@ function validateAlphanumeric(input, fieldName) {
     const validPattern = /^[a-zA-Z0-9_-]+$/;
     
     if (!input || input.trim() === '') {
-        return { valid: false, message: `${fieldName} cannot be empty` };
+        return { valid: false, message: `${fieldName}不能为空` };
     }
     
     if (!validPattern.test(input)) {
-        return { valid: false, message: `${fieldName} can only contain English letters, numbers, underscores and hyphens, no other special symbols, Chinese characters or other characters are allowed` };
+        return { valid: false, message: `${fieldName}只能包含英文字母、数字、下划线和短横线，不允许其他特殊符号、中文或其他字符` };
     }
     
     return { valid: true, message: '' };
@@ -2343,18 +2408,18 @@ function showAddUserForm() {
     const formHtml = `
         <div class="modal-overlay" id="userModal">
             <div class="modal-content">
-                <h4>Add User</h4>
+                <h4>添加用户</h4>
                 <div class="form-group">
-                    <label>Username</label>
-                    <input type="text" id="newUsername" placeholder="Enter username" maxlength="50">
+                    <label>用户名</label>
+                    <input type="text" id="newUsername" placeholder="请输入用户名" maxlength="50">
                 </div>
                 <div class="form-group">
-                    <label>Password</label>
-                    <input type="password" id="newPassword" placeholder="Enter password" maxlength="100">
+                    <label>密码</label>
+                    <input type="password" id="newPassword" placeholder="请输入密码" maxlength="100">
                 </div>
                 <div class="form-actions">
-                    <button class="btn btn-secondary" onclick="closeModal('userModal')">Cancel</button>
-                    <button class="btn btn-success" onclick="submitAddUser()">Add</button>
+                    <button class="btn btn-secondary" onclick="closeModal('userModal')">取消</button>
+                    <button class="btn btn-success" onclick="submitAddUser()">添加</button>
                 </div>
             </div>
         </div>
@@ -2367,26 +2432,26 @@ function submitAddUser() {
     const password = document.getElementById('newPassword').value;
     
     // username
-    const usernameValidation = validateAlphanumeric(username, 'Username');
+    const usernameValidation = validateAlphanumeric(username, '用户名');
     if (!usernameValidation.valid) {
         showAlert(usernameValidation.message, 'error');
         return;
     }
     
     if (username.length < 3 || username.length > 50) {
-        showAlert('Username length must be between 3-50 characters', 'error');
+        showAlert('用户名长度必须在 3-50 个字符之间', 'error');
         return;
     }
     
     // password
-    const passwordValidation = validateAlphanumeric(password, 'Password');
+    const passwordValidation = validateAlphanumeric(password, '密码');
     if (!passwordValidation.valid) {
         showAlert(passwordValidation.message, 'error');
         return;
     }
     
     if (password.length < 6 || password.length > 100) {
-        showAlert('Password length must be between 6-100 characters', 'error');
+        showAlert('密码长度必须在 6-100 个字符之间', 'error');
         return;
     }
     
@@ -2408,7 +2473,7 @@ async function addUser(username, password) {
         loadPageContent('users'); // Refresh user list
     } catch (error) {
         if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to add user: ' + error.message, 'error');
+            showAlert('添加用户失败：' + error.message, 'error');
         }
     }
 }
@@ -2418,26 +2483,26 @@ function editUser(username) {
     const formHtml = `
         <div class="modal-overlay" id="editUserModal">
             <div class="modal-content">
-                <h4>Edit User - ${username}</h4>
+                <h4>编辑用户 - ${username}</h4>
                 ${!isAdmin ? `
                 <div class="form-group">
-                    <label>Username</label>
+                    <label>用户名</label>
                     <input type="text" id="editUsername" value="${username}" maxlength="50">
                 </div>
                 ` : `
                 <div class="form-group">
-                    <label>Username</label>
+                    <label>用户名</label>
                     <input type="text" value="${username}" disabled>
-                    <small>Administrator username cannot be modified</small>
+                    <small>管理员用户名不能修改</small>
                 </div>
                 `}
                 <div class="form-group">
-                    <label>New Password (Optional)</label>
-                    <input type="password" id="editPassword" placeholder="Leave blank to keep current password" maxlength="100">
+                    <label>新密码（可选）</label>
+                    <input type="password" id="editPassword" placeholder="留空表示保持当前密码" maxlength="100">
                 </div>
                 <div class="form-actions">
-                    <button class="btn btn-secondary" onclick="closeModal('editUserModal')">Cancel</button>
-                    <button class="btn btn-success" onclick="submitEditUser('${username}')">Save</button>
+                    <button class="btn btn-secondary" onclick="closeModal('editUserModal')">取消</button>
+                    <button class="btn btn-success" onclick="submitEditUser('${username}')">保存</button>
                 </div>
             </div>
         </div>
@@ -2453,13 +2518,13 @@ function submitEditUser(originalUsername) {
     
     // If password is entered, validate and add to update data
     if (newPassword) {
-        const passwordValidation = validateAlphanumeric(newPassword, 'Password');
+        const passwordValidation = validateAlphanumeric(newPassword, '密码');
         if (!passwordValidation.valid) {
             showAlert(passwordValidation.message, 'error');
             return;
         }
         if (newPassword.length < 6 || newPassword.length > 100) {
-            showAlert('Password length must be between 6-100 characters', 'error');
+            showAlert('密码长度必须在 6-100 个字符之间', 'error');
             return;
         }
         updateData.password = newPassword;
@@ -2467,13 +2532,13 @@ function submitEditUser(originalUsername) {
     
     // If not admin and username has changed
     if (originalUsername !== 'admin' && newUsername && newUsername !== originalUsername) {
-        const usernameValidation = validateAlphanumeric(newUsername, 'Username');
+        const usernameValidation = validateAlphanumeric(newUsername, '用户名');
         if (!usernameValidation.valid) {
             showAlert(usernameValidation.message, 'error');
             return;
         }
         if (newUsername.length < 3 || newUsername.length > 50) {
-            showAlert('Username length must be between 3-50 characters', 'error');
+            showAlert('用户名长度必须在 3-50 个字符之间', 'error');
             return;
         }
         updateData.username = newUsername;
@@ -2481,7 +2546,7 @@ function submitEditUser(originalUsername) {
     
     // Check if there are any updates
     if (Object.keys(updateData).length === 0) {
-        showAlert('No changes made', 'warning');
+        showAlert('未做任何修改', 'warning');
         return;
     }
     
@@ -2503,7 +2568,7 @@ async function updateUser(username, data) {
         loadPageContent('users'); // Refresh user list
     } catch (error) {
         if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to update user: ' + error.message, 'error');
+            showAlert('更新用户失败：' + error.message, 'error');
         }
     }
 }
@@ -2511,8 +2576,8 @@ async function updateUser(username, data) {
 function deleteUser(username) {
     // console.log('deleteUser called with username:', username);
     showConfirmDialog(
-        'Confirm Delete User',
-        `Are you sure you want to delete user "${username}"? This action cannot be undone.`,
+        '确认删除用户',
+        `确定要删除用户 "${username}" 吗？此操作无法撤销。`,
         () => {
             // console.log('User confirmed deletion');
             removeUser(username);
@@ -2539,7 +2604,7 @@ async function removeUser(username) {
     } catch (error) {
         // console.error('Error in removeUser:', error);
         if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to delete user: ' + error.message, 'error');
+            showAlert('删除用户失败：' + error.message, 'error');
         }
     }
 }
@@ -2547,7 +2612,7 @@ async function removeUser(username) {
 // Mount point management functions
 async function showAddMountForm() {
     // Get user list for dropdown selection
-    let usersOptions = '<option value="">No user binding</option>';
+    let usersOptions = '<option value="">不绑定用户</option>';
     try {
         const response = await fetch('/api/users');
         if (response.ok) {
@@ -2563,24 +2628,24 @@ async function showAddMountForm() {
     const formHtml = `
         <div class="modal-overlay" id="mountModal">
             <div class="modal-content">
-                <h4>Add Mount Point</h4>
+                <h4>添加挂载点</h4>
                 <div class="form-group">
-                    <label>Mount Point Name</label>
-                    <input type="text" id="newMountName" placeholder="Enter mount point name" maxlength="50">
+                    <label>挂载点名称</label>
+                    <input type="text" id="newMountName" placeholder="请输入挂载点名称" maxlength="50">
                 </div>
                 <div class="form-group">
-                    <label>Password (NTRIP 1.0)</label>
-                    <input type="password" id="newMountPassword" placeholder="Enter password" maxlength="100">
+                    <label>密码（NTRIP 1.0）</label>
+                    <input type="password" id="newMountPassword" placeholder="请输入密码" maxlength="100">
                 </div>
                 <div class="form-group">
-                    <label>Bind User (NTRIP 2.0)</label>
+                    <label>绑定用户（NTRIP 2.0）</label>
                     <select id="newMountUser">
                         ${usersOptions}
                     </select>
                 </div>
                 <div class="form-actions">
-                    <button class="btn btn-secondary" onclick="closeModal('mountModal')">Cancel</button>
-                    <button class="btn btn-success" onclick="submitAddMount()">Add</button>
+                    <button class="btn btn-secondary" onclick="closeModal('mountModal')">取消</button>
+                    <button class="btn btn-success" onclick="submitAddMount()">添加</button>
                 </div>
             </div>
         </div>
@@ -2593,27 +2658,27 @@ function submitAddMount() {
     const password = document.getElementById('newMountPassword').value;
     const userId = document.getElementById('newMountUser').value;
     
-    // Validate mount point name
-    const mountNameValidation = validateAlphanumeric(mountName, 'Mount point name');
+    // 验证挂载点名称
+    const mountNameValidation = validateAlphanumeric(mountName, '挂载点名称');
     if (!mountNameValidation.valid) {
         showAlert(mountNameValidation.message, 'error');
         return;
     }
     
-    // Validate password
-    const passwordValidation = validateAlphanumeric(password, 'Password');
+    // 验证密码
+    const passwordValidation = validateAlphanumeric(password, '密码');
     if (!passwordValidation.valid) {
         showAlert(passwordValidation.message, 'error');
         return;
     }
     
     if (mountName.length < 3 || mountName.length > 50) {
-        showAlert('Mount point name length must be between 3-50 characters', 'error');
+        showAlert('挂载点名称长度必须在 3-50 个字符之间', 'error');
         return;
     }
     
     if (password.length < 6 || password.length > 100) {
-        showAlert('Password length must be between 6-100 characters', 'error');
+        showAlert('密码长度必须在 6-100 个字符之间', 'error');
         return;
     }
     
@@ -2640,7 +2705,7 @@ async function addMount(mountData) {
         loadPageContent('mounts'); // Refresh mount point list
     } catch (error) {
         if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to add mount point: ' + error.message, 'error');
+            showAlert('添加挂载点失败：' + error.message, 'error');
         }
     }
 }
@@ -2675,22 +2740,22 @@ async function editMount(mount) {
     const formHtml = `
         <div class="modal-overlay" id="editMountModal">
             <div class="modal-content">
-                <h4>Edit Mount Point - ${mount}</h4>
+                <h4>编辑挂载点 - ${mount}</h4>
                 <div class="form-group">
-                    <label>Mount Point Name</label>
+                    <label>挂载点名称</label>
                     <input type="text" id="editMountName" value="${mount}" maxlength="50">
                 </div>
                 <div class="form-group">
-                    <label>New Password (NTRIP 1.0)</label>
-                    <input type="password" id="editMountPassword" placeholder="Leave blank to keep current password" maxlength="100">
+                    <label>新密码（NTRIP 1.0）</label>
+                    <input type="password" id="editMountPassword" placeholder="留空表示保持当前密码" maxlength="100">
                 </div>
                 <div class="form-group">
-                    <label>Bind User (NTRIP 2.0)</label>
-                    <input type="text" id="editMountUser" value="${currentUsername}" placeholder="Enter username, leave blank for no binding" maxlength="50">
+                    <label>绑定用户（NTRIP 2.0）</label>
+                    <input type="text" id="editMountUser" value="${currentUsername}" placeholder="请输入用户名，留空表示不绑定" maxlength="50">
                 </div>
                 <div class="form-actions">
-                    <button class="btn btn-secondary" onclick="closeModal('editMountModal')">Cancel</button>
-                    <button class="btn btn-success" onclick="submitEditMount('${mount}')">Save</button>
+                    <button class="btn btn-secondary" onclick="closeModal('editMountModal')">取消</button>
+                    <button class="btn btn-success" onclick="submitEditMount('${mount}')">保存</button>
                 </div>
             </div>
         </div>
@@ -2705,37 +2770,37 @@ async function submitEditMount(originalMount) {
     
     const updateData = {};
     
-    // If password is entered, validate and add to update data
+    // 如果输入了密码，验证并加入更新数据
     if (newPassword) {
-        const passwordValidation = validateAlphanumeric(newPassword, 'Password');
+        const passwordValidation = validateAlphanumeric(newPassword, '密码');
         if (!passwordValidation.valid) {
             showAlert(passwordValidation.message, 'error');
             return;
         }
         if (newPassword.length < 6 || newPassword.length > 100) {
-            showAlert('Password length must be between 6-100 characters', 'error');
+            showAlert('密码长度必须在 6-100 个字符之间', 'error');
             return;
         }
         updateData.password = newPassword;
     }
     
-    // If mount point name has changed and is not empty
+    // 如果挂载点名称已更改且不为空
     if (newMountName && newMountName !== originalMount) {
-        const mountNameValidation = validateAlphanumeric(newMountName, 'Mount point name');
+        const mountNameValidation = validateAlphanumeric(newMountName, '挂载点名称');
         if (!mountNameValidation.valid) {
             showAlert(mountNameValidation.message, 'error');
             return;
         }
         if (newMountName.length < 3 || newMountName.length > 50) {
-            showAlert('Mount point name length must be between 3-50 characters', 'error');
+            showAlert('挂载点名称长度必须在 3-50 个字符之间', 'error');
             return;
         }
         updateData.mount_name = newMountName;
     }
     
-    // Handle username binding
+    // 处理用户绑定
     if (username) {
-        const usernameValidation = validateAlphanumeric(username, 'Username');
+        const usernameValidation = validateAlphanumeric(username, '用户名');
         if (!usernameValidation.valid) {
             showAlert(usernameValidation.message, 'error');
             return;
@@ -2743,9 +2808,9 @@ async function submitEditMount(originalMount) {
     }
     updateData.username = username || "";
     
-    // Check if there are any updates
+    // 检查是否有任何更新
     if (Object.keys(updateData).length === 0) {
-        showAlert('No changes made', 'warning');
+        showAlert('未做任何修改', 'warning');
         return;
     }
     
@@ -2768,20 +2833,20 @@ async function updateMount(mount, data) {
         loadPageContent('mounts'); // Refresh mount point list
     } catch (error) {
         if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to update mount point: ' + error.message, 'error');
+            showAlert('更新挂载点失败：' + error.message, 'error');
         }
     }
 }
 
 function deleteMount(mount) {
     showConfirmDialog(
-        'Confirm Delete Mount Point',
-        `Are you sure you want to delete mount point "${mount}"? This action cannot be undone.`,
+        '确认删除挂载点',
+        `确定要删除挂载点 "${mount}" 吗？此操作无法撤销。`,
         () => {
             removeMount(mount);
         },
         () => {
-            // User cancelled deletion
+            // 用户取消删除
         }
     );
 }
@@ -2797,7 +2862,7 @@ async function removeMount(mount) {
             loadPageContent('mounts'); // Refresh mount point list
         } catch (error) {
             if (error.message !== 'Unauthorized access') {
-                showAlert('Failed to delete mount point: ' + error.message, 'error');
+                showAlert('删除挂载点失败：' + error.message, 'error');
             }
         }
     }
@@ -2809,31 +2874,31 @@ async function removeMount(mount) {
         const confirmPassword = document.getElementById('confirm-password').value;
         
         if (!newPassword || !confirmPassword) {
-            showAlert('Please enter new password and confirm password', 'warning');
+            showAlert('请输入新密码和确认密码', 'warning');
             return;
         }
         
-        // Validate new password
-        const passwordValidation = validateAlphanumeric(newPassword, 'New password');
+        // 验证新密码
+        const passwordValidation = validateAlphanumeric(newPassword, '新密码');
         if (!passwordValidation.valid) {
             showAlert(passwordValidation.message, 'error');
             return;
         }
         
-        // Validate confirm password
-        const confirmPasswordValidation = validateAlphanumeric(confirmPassword, 'Confirm password');
+        // 验证确认密码
+        const confirmPasswordValidation = validateAlphanumeric(confirmPassword, '确认密码');
         if (!confirmPasswordValidation.valid) {
             showAlert(confirmPasswordValidation.message, 'error');
             return;
         }
         
         if (newPassword !== confirmPassword) {
-            showAlert('The two passwords entered do not match', 'error');
+            showAlert('两次输入的密码不一致', 'error');
             return;
         }
         
         if (newPassword.length < 6) {
-            showAlert('Password must be at least 6 characters long', 'error');
+            showAlert('密码长度至少为 6 个字符', 'error');
             return;
         }
         
@@ -2849,24 +2914,24 @@ async function removeMount(mount) {
             const result = await response.json();
             
             if (response.ok) {
-                showAlert('Administrator password changed successfully', 'success');
+                showAlert('管理员密码修改成功', 'success');
                 document.getElementById('admin-password').value = '';
                 document.getElementById('confirm-password').value = '';
             } else {
-                showAlert('Error: ' + result.error, 'error');
+                showAlert('错误：' + result.error, 'error');
             }
         } catch (error) {
-            // console.error('Failed to change password:', error);
-            showAlert('Failed to change password: ' + error.message, 'error');
+            // console.error('修改密码失败:', error);
+            showAlert('修改密码失败：' + error.message, 'error');
         }
     }
     
     async function restartProgram() {
         showConfirmDialog(
-        'Confirm Restart',
-        'Are you sure you want to restart the program? All connections will be disconnected after restart, please proceed with caution!',
+        '确认重启',
+        '确定要重启程序吗？重启后将断开所有连接，请谨慎操作！',
         async function() {
-            // Execute restart logic
+            // 执行重启逻辑
             await performRestart();
         }
     );
@@ -2883,18 +2948,18 @@ async function performRestart() {
             });
             
             if (response.ok) {
-                showAlert('Program restart command sent, system will restart in 3 seconds...', 'success');
-                // Refresh page after 3 seconds
+                showAlert('重启命令已发送，系统将在 3 秒后重启...', 'success');
+                // 3 秒后刷新页面
                 setTimeout(() => {
                     window.location.reload();
                 }, 3000);
             } else {
                 const result = await response.json();
-                showAlert('Restart failed: ' + (result.error || 'Unknown error'), 'error');
+                showAlert('重启失败：' + (result.error || '未知错误'), 'error');
             }
         } catch (error) {
-            // console.error('Failed to restart program:', error);
-            showAlert('Failed to restart program: ' + error.message, 'error');
+            // console.error('重启程序失败:', error);
+            showAlert('重启程序失败：' + error.message, 'error');
         }
     }
 
@@ -2936,7 +3001,7 @@ function showAlert(message, type = 'info') {
                 <div style="font-size: 2rem; margin-bottom: 1rem;">${iconMap[type] || iconMap['info']}</div>
                 <p style="margin-bottom: 2rem; color: #666; line-height: 1.5; font-size: 1.1rem;">${message}</p>
                 <div style="display: flex; justify-content: center;">
-                    <button class="btn" style="background: ${colorMap[type] || colorMap['info']}; color: white; border: none;" onclick="closeModal('${modalId}')">OK</button>
+                    <button class="btn" style="background: ${colorMap[type] || colorMap['info']}; color: white; border: none;" onclick="closeModal('${modalId}')">确定</button>
                 </div>
             </div>
         </div>
@@ -2977,8 +3042,8 @@ function showConfirmDialog(title, message, onConfirm, onCancel) {
                 <h4>${title}</h4>
                 <p style="margin-bottom: 2rem; color: #666; line-height: 1.5;">${message}</p>
                 <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                    <button class="btn btn-secondary" onclick="cancelConfirm()">Cancel</button>
-                    <button class="btn btn-primary" onclick="confirmAction()">YES</button>
+                    <button class="btn btn-secondary" onclick="cancelConfirm()">取消</button>
+                    <button class="btn btn-primary" onclick="confirmAction()">确定</button>
                 </div>
             </div>
         </div>
@@ -3035,12 +3100,12 @@ function cancelConfirm() {
         }
     });
     
-    // Logout function
+    // 登出函数
     function logout() {
-        // Simplified logout process, execute logout operation directly
+        // 简化登出流程，直接执行登出操作
         showConfirmDialog(
-            'Confirm Logout',
-            'Are you sure you want to logout?',
+            '确认登出',
+            '确定要登出吗？',
             () => {
                 fetch('/logout', {
                     method: 'POST',
@@ -3050,12 +3115,12 @@ function cancelConfirm() {
                 }).then(() => {
                     window.location.href = '/login';
                 }).catch(error => {
-                     // console.error('Logout failed:', error);
+                     // console.error('登出失败:', error);
                      window.location.href = '/login';
                  });
              },
              () => {
-                 // User cancelled logout
+                 // 用户取消登出
              }
          );
     }

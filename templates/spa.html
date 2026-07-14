@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>2RTK NTRIP Caster</title>
+    <link rel="shortcut icon" href="/static/favicon.ico" type="image/x-icon">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <!-- 地图库 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v8.2.0/ol.css" type="text/css">
@@ -1584,12 +1585,12 @@
         <!-- 导航栏 -->
         <nav class="navbar">
             <div class="nav-container">
-                <a href="#" class="nav-item active" data-page="dashboard" onclick="navigateTo('dashboard')">Home</a>
-                <a href="#" class="nav-item" data-page="users" onclick="navigateTo('users')">User Mgmt</a>
-                <a href="#" class="nav-item" data-page="mounts" onclick="navigateTo('mounts')">Mount Mgmt</a>
-                <a href="#" class="nav-item" data-page="monitor" onclick="navigateTo('monitor')">Sources</a>
-                <a href="#" class="nav-item" data-page="settings" onclick="navigateTo('settings')">Settings</a>
-                <a href="#" class="nav-item" onclick="logout()">Logout</a>
+                <a href="#" class="nav-item active" data-page="dashboard" onclick="navigateTo('dashboard')">首页</a>
+                <a href="#" class="nav-item" data-page="users" onclick="navigateTo('users')">用户管理</a>
+                <a href="#" class="nav-item" data-page="mounts" onclick="navigateTo('mounts')">挂载点管理</a>
+                <a href="#" class="nav-item" data-page="monitor" onclick="navigateTo('monitor')">数据源</a>
+                <a href="#" class="nav-item" data-page="settings" onclick="navigateTo('settings')">系统设置</a>
+                <a href="#" class="nav-item" onclick="logout()">退出登录</a>
             </div>
         </nav>
 
@@ -1604,10 +1605,10 @@
 
             
             <div class="content-panel" id="log-panel">
-                <h3 style="margin-bottom: 1rem; color: #2c3e50;">System Logs</h3>
+                <h3 style="margin-bottom: 1rem; color: #2c3e50;">系统日志</h3>
                 <div class="log-terminal" id="log-terminal">
-                    <div class="log-line info">[INFO] 2RTK Ntrip Caster started successfully</div>
-                    <div class="log-line info">[INFO] Web management interface started</div>
+                <div class="log-line info">[INFO] 2RTK Ntrip Caster 启动成功</div>
+                <div class="log-line info">[INFO] Web 管理界面已启动</div>
                 </div>
             </div>
         </main>

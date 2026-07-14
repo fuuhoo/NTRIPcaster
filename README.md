@@ -39,6 +39,34 @@ docker run -d \
 - **中文教程**: [Linux 系统原生安装教程](INSTALL-TUTORIAL.md)
 - **English Tutorial**: [Linux Native Installation Guide](INSTALL-TUTORIAL-EN.md)
 
+### Windows Native / Docker Startup
+- **中文教程**: [Windows 下启动说明](WINDOWS-START.md)
+- 支持直接在 Windows 10/11 上运行，也支持 Docker Desktop 部署
+
+#### Quick Start on Windows
+
+```powershell
+# Docker one-click start
+docker run -d --name ntrip-caster -p 2101:2101 -p 5757:5757 2rtk/ntripcaster:latest
+
+# Or use Docker Compose
+cd NTRIPcaster
+docker-compose up -d
+
+# Native Python start (requires Python 3.8+)
+python -m venv venv
+.\venv\Scripts\activate
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+python main.py
+```
+
+- Web 管理界面（默认）：`http://localhost:5757`
+- NTRIP 服务（默认）：`ntrip://localhost:2101`
+- 默认账号：`admin` / `admin123`
+
+For detailed Windows instructions, see [WINDOWS-START.md](WINDOWS-START.md).
+
 **Access URLs**:
 - Web Management Interface: `http://yourserverip:5757`
 - NTRIP Service: `ntrip://yourserverip:2101`
