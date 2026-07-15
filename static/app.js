@@ -71,7 +71,7 @@ function updateConnectionStatus() {
 // Page navigation
 function navigateTo(page) {
     // Check pages that require login
-    const requireLoginPages = ['users', 'mounts', 'settings'];
+    const requireLoginPages = ['users', 'mounts', 'connection_events', 'settings'];
     if (requireLoginPages.includes(page)) {
         // Check login status
         checkLoginStatusForProtectedPage().then(isLoggedIn => {
@@ -209,10 +209,17 @@ async function loadPageContent(page) {
                     initializeMapForMonitor();
                 }, 300);
                 break;
+            case 'connection_events':
+                // Ensure content panel is displayed on non-dashboard pages
+                contentDiv.parentElement.style.display = 'block';
+                contentDiv.innerHTML = getConnectionEventsContent();
+                loadConnectionEvents(0, 100);
+                break;
             case 'settings':
                 // Ensure content panel is displayed on non-dashboard pages
                 contentDiv.parentElement.style.display = 'block';
                 contentDiv.innerHTML = getSettingsContent();
+                loadNotificationBots();
                 break;
         }
     } catch (error) {
@@ -1649,6 +1656,37 @@ function getMonitorContent() {
     `;
 }
 
+// 连接事件内容
+function getConnectionEventsContent() {
+    return `
+        <div class="page-header">
+            <h3>连接事件日志</h3>
+            <p class="page-subtitle">基站（上传端）和挂载点（用户连接/下载端）的上下线记录</p>
+        </div>
+        <div class="settings-container" style="max-width: 100%; margin: 0 auto;">
+            <div class="settings-section">
+                <div class="form-group" style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 0;">
+                    <select id="connection-event-filter" class="form-control" style="width: auto; min-width: 120px;">
+                        <option value="">全部事件</option>
+                        <option value="base_station_online">基站上线</option>
+                        <option value="base_station_offline">基站下线</option>
+                        <option value="mount_online">挂载点上线</option>
+                        <option value="mount_offline">挂载点下线</option>
+                    </select>
+                    <input type="text" id="connection-event-mount" placeholder="挂载点名称" class="form-control" style="width: auto; min-width: 120px;">
+                    <input type="text" id="connection-event-user" placeholder="用户名" class="form-control" style="width: auto; min-width: 120px;">
+                    <input type="datetime-local" id="connection-event-start" class="form-control" style="width: auto; min-width: 160px;">
+                    <input type="datetime-local" id="connection-event-end" class="form-control" style="width: auto; min-width: 160px;">
+                    <button onclick="loadConnectionEvents()" class="btn btn-primary">查询</button>
+                </div>
+            </div>
+            <div id="connection-events-list">
+                <p class="loading-text">正在加载事件日志...</p>
+            </div>
+        </div>
+    `;
+}
+
 // settings
 function getSettingsContent() {
     return `
@@ -1667,6 +1705,15 @@ function getSettingsContent() {
                     <input type="password" id="confirm-password" placeholder="请再次输入密码" class="form-control">
                 </div>
                 <button onclick="changePassword()" class="btn btn-primary">修改管理员密码</button>
+            </div>
+
+            <div class="settings-section">
+                <h4>消息机器人通知</h4>
+                <p class="section-desc">当基站（挂载点上传端）或挂载点（用户连接/下载端）上线或下线时，向钉钉或企业微信群机器人发送消息提醒。</p>
+                <div id="notification-bots-list">
+                    <p class="loading-text">正在加载机器人配置...</p>
+                </div>
+                <button onclick="showAddNotificationBotForm()" class="btn btn-primary" style="margin-top: 10px;">添加消息机器人</button>
             </div>
 
             <div class="settings-section">
@@ -3126,6 +3173,234 @@ function cancelConfirm() {
     }
 
 
+// ==================== 消息机器人通知功能 ====================
+
+async function loadNotificationBots() {
+    try {
+        const response = await fetch('/api/notification/bots');
+        const result = await handleApiResponse(response);
+        if (result.success) {
+            renderNotificationBots(result.bots || []);
+        } else {
+            showAlert('加载消息机器人配置失败：' + (result.error || '未知错误'), 'error');
+        }
+    } catch (error) {
+        if (error.message !== 'Unauthorized access') {
+            showAlert('加载消息机器人配置失败：' + error.message, 'error');
+        }
+    }
+}
+
+function renderNotificationBots(bots) {
+    const container = document.getElementById('notification-bots-list');
+    if (!container) return;
+
+    if (!bots || bots.length === 0) {
+        container.innerHTML = '<p class="empty-text" style="color: #6c757d; padding: 10px 0;">暂无消息机器人配置，点击下方按钮添加。</p>';
+        return;
+    }
+
+    const eventLabels = {
+        'base_station_online': '基站上线',
+        'base_station_offline': '基站下线',
+        'mount_online': '挂载点上线',
+        'mount_offline': '挂载点下线'
+    };
+
+    const platformLabels = {
+        'dingtalk': '钉钉',
+        'wecom': '企业微信'
+    };
+
+    const html = bots.map(bot => {
+        const eventTags = (bot.events || []).map(e => `<span class="event-tag">${eventLabels[e] || e}</span>`).join('');
+        const enabledText = bot.enabled ? '<span style="color: #28a745;">已启用</span>' : '<span style="color: #dc3545;">已禁用</span>';
+        return `
+            <div class="bot-card" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 12px 15px; margin-bottom: 10px; background: #fafbfc;">
+                <div class="bot-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <div style="font-weight: bold; color: #333;">${escapeHtml(bot.name)}</div>
+                    <div style="font-size: 0.85em;">${platformLabels[bot.platform] || bot.platform} · ${enabledText}</div>
+                </div>
+                <div class="bot-url" style="font-size: 0.85em; color: #6c757d; margin-bottom: 8px; word-break: break-all;">${escapeHtml(bot.webhook_url)}</div>
+                <div class="bot-events" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">${eventTags}</div>
+                <div class="bot-actions" style="display: flex; gap: 8px;">
+                    <button class="btn btn-primary btn-sm" onclick="editNotificationBot(${bot.id})">编辑</button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteNotificationBot(${bot.id})">删除</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = html;
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function showAddNotificationBotForm() {
+    showNotificationBotModal();
+}
+
+function showNotificationBotModal(bot = null) {
+    const isEdit = bot !== null;
+    const title = isEdit ? '编辑消息机器人' : '添加消息机器人';
+    const name = bot ? bot.name : '';
+    const platform = bot ? bot.platform : 'dingtalk';
+    const webhookUrl = bot ? bot.webhook_url : '';
+    const enabled = bot ? bot.enabled : true;
+    const events = bot ? (bot.events || []) : [];
+
+    const formHtml = `
+        <div class="modal-overlay" id="botModal">
+            <div class="modal-content" style="max-width: 500px;">
+                <h4>${title}</h4>
+                <div class="form-group">
+                    <label>机器人名称</label>
+                    <input type="text" id="botName" value="${escapeHtml(name)}" placeholder="例如：运维通知群" maxlength="50">
+                </div>
+                <div class="form-group">
+                    <label>平台</label>
+                    <select id="botPlatform">
+                        <option value="dingtalk" ${platform === 'dingtalk' ? 'selected' : ''}>钉钉</option>
+                        <option value="wecom" ${platform === 'wecom' ? 'selected' : ''}>企业微信</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Webhook 地址</label>
+                    <input type="text" id="botWebhookUrl" value="${escapeHtml(webhookUrl)}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=xxx">
+                </div>
+                <div class="form-group">
+                    <label>消息类型</label>
+                    <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                        <label style="display: flex; align-items: center; gap: 5px; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="eventBaseStationOnline" value="base_station_online" ${events.includes('base_station_online') ? 'checked' : ''}>
+                            基站上线
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 5px; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="eventBaseStationOffline" value="base_station_offline" ${events.includes('base_station_offline') ? 'checked' : ''}>
+                            基站下线
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 5px; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="eventMountOnline" value="mount_online" ${events.includes('mount_online') ? 'checked' : ''}>
+                            挂载点上线
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 5px; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="eventMountOffline" value="mount_offline" ${events.includes('mount_offline') ? 'checked' : ''}>
+                            挂载点下线
+                        </label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 5px; font-weight: normal; cursor: pointer;">
+                        <input type="checkbox" id="botEnabled" ${enabled ? 'checked' : ''}>
+                        启用该机器人
+                    </label>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-secondary" onclick="closeModal('botModal')">取消</button>
+                    <button class="btn btn-success" onclick="submitNotificationBot(${isEdit ? bot.id : 'null'})">${isEdit ? '保存' : '添加'}</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', formHtml);
+}
+
+async function submitNotificationBot(botId) {
+    const name = document.getElementById('botName').value.trim();
+    const platform = document.getElementById('botPlatform').value;
+    const webhookUrl = document.getElementById('botWebhookUrl').value.trim();
+    const enabled = document.getElementById('botEnabled').checked;
+    const events = [];
+    if (document.getElementById('eventBaseStationOnline').checked) events.push('base_station_online');
+    if (document.getElementById('eventBaseStationOffline').checked) events.push('base_station_offline');
+    if (document.getElementById('eventMountOnline').checked) events.push('mount_online');
+    if (document.getElementById('eventMountOffline').checked) events.push('mount_offline');
+
+    if (!name) {
+        showAlert('机器人名称不能为空', 'error');
+        return;
+    }
+    if (!webhookUrl) {
+        showAlert('Webhook 地址不能为空', 'error');
+        return;
+    }
+    if (events.length === 0) {
+        showAlert('请至少选择一个消息类型', 'error');
+        return;
+    }
+
+    const payload = { name, platform, webhook_url: webhookUrl, enabled, events };
+    const url = botId ? `/api/notification/bots/${botId}` : '/api/notification/bots';
+    const method = botId ? 'PUT' : 'POST';
+
+    try {
+        const response = await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const result = await handleApiResponse(response);
+        if (result.success) {
+            showAlert(result.message, 'success');
+            closeModal('botModal');
+            loadNotificationBots();
+        } else {
+            showAlert('保存失败：' + (result.error || '未知错误'), 'error');
+        }
+    } catch (error) {
+        if (error.message !== 'Unauthorized access') {
+            showAlert('保存失败：' + error.message, 'error');
+        }
+    }
+}
+
+async function editNotificationBot(botId) {
+    try {
+        const response = await fetch('/api/notification/bots');
+        const result = await handleApiResponse(response);
+        if (result.success && result.bots) {
+            const bot = result.bots.find(b => b.id === botId);
+            if (bot) {
+                showNotificationBotModal(bot);
+            }
+        }
+    } catch (error) {
+        if (error.message !== 'Unauthorized access') {
+            showAlert('加载机器人信息失败：' + error.message, 'error');
+        }
+    }
+}
+
+function deleteNotificationBot(botId) {
+    showConfirmDialog(
+        '确认删除',
+        '确定要删除该消息机器人配置吗？此操作无法撤销。',
+        async () => {
+            try {
+                const response = await fetch(`/api/notification/bots/${botId}`, {
+                    method: 'DELETE'
+                });
+                const result = await handleApiResponse(response);
+                if (result.success) {
+                    showAlert(result.message, 'success');
+                    loadNotificationBots();
+                } else {
+                    showAlert('删除失败：' + (result.error || '未知错误'), 'error');
+                }
+            } catch (error) {
+                if (error.message !== 'Unauthorized access') {
+                    showAlert('删除失败：' + error.message, 'error');
+                }
+            }
+        }
+    );
+}
+
 async function loadAppInfo() {
     try {
         const response = await fetch('/api/app_info');
@@ -3148,4 +3423,143 @@ async function loadAppInfo() {
     } catch (error) {
         // console.error('Failed to load application information:', error);
     }
+}
+
+// ==================== 连接事件日志功能 ====================
+
+async function loadConnectionEvents(offset = 0, limit = 100) {
+    try {
+        const eventType = document.getElementById('connection-event-filter')?.value || '';
+        const mountName = document.getElementById('connection-event-mount')?.value.trim() || '';
+        const username = document.getElementById('connection-event-user')?.value.trim() || '';
+        const startInput = document.getElementById('connection-event-start')?.value || '';
+        const endInput = document.getElementById('connection-event-end')?.value || '';
+        const startTime = startInput ? startInput.replace('T', ' ') + ':00' : '';
+        const endTime = endInput ? endInput.replace('T', ' ') + ':00' : '';
+
+        const params = new URLSearchParams();
+        if (eventType) params.append('event_type', eventType);
+        if (mountName) params.append('mount_name', mountName);
+        if (username) params.append('username', username);
+        if (startTime) params.append('start_time', startTime);
+        if (endTime) params.append('end_time', endTime);
+        params.append('limit', String(limit));
+        params.append('offset', String(offset));
+
+        const response = await fetch('/api/connection_events?' + params.toString());
+        const result = await handleApiResponse(response);
+        if (result.success) {
+            renderConnectionEvents(result.events || [], result.statistics || {}, {
+                offset: result.offset,
+                limit: result.limit,
+                total: result.total
+            });
+        } else {
+            showAlert('加载连接事件日志失败：' + (result.error || '未知错误'), 'error');
+        }
+    } catch (error) {
+        if (error.message !== 'Unauthorized access') {
+            showAlert('加载连接事件日志失败：' + error.message, 'error');
+        }
+    }
+}
+
+function renderConnectionEvents(events, statistics, pagination = null) {
+    const container = document.getElementById('connection-events-list');
+    if (!container) return;
+
+    const eventTypeColors = {
+        'base_station_online': '#28a745',
+        'base_station_offline': '#dc3545',
+        'mount_online': '#17a2b8',
+        'mount_offline': '#fd7e14'
+    };
+
+    const eventLabels = {
+        'base_station_online': '基站上线',
+        'base_station_offline': '基站下线',
+        'mount_online': '挂载点上线',
+        'mount_offline': '挂载点下线'
+    };
+
+    const statItems = Object.entries(statistics).map(([type, count]) => {
+        return `<span style="display: inline-block; margin-right: 15px; font-size: 0.85em; color: #6c757d;">${eventLabels[type] || type}: <strong style="color: ${eventTypeColors[type] || '#333'};">${count}</strong></span>`;
+    }).join('');
+
+    let paginationHtml = '';
+    if (pagination) {
+        const { offset, limit, total } = pagination;
+        const currentPage = Math.floor(offset / limit) + 1;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+        const hasPrev = offset > 0;
+        const hasNext = offset + events.length < total;
+        const startRange = total > 0 ? offset + 1 : 0;
+        const endRange = offset + events.length;
+
+        paginationHtml = `
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 0.85em; color: #6c757d;">
+                <div>显示第 ${startRange} - ${endRange} 条，共 ${total} 条</div>
+                <div style="display: flex; gap: 5px; align-items: center;">
+                    <button class="btn btn-secondary btn-sm" ${!hasPrev ? 'disabled' : ''} onclick="loadConnectionEvents(${offset - limit}, ${limit})">上一页</button>
+                    <span>第 ${currentPage} / ${totalPages} 页</span>
+                    <button class="btn btn-secondary btn-sm" ${!hasNext ? 'disabled' : ''} onclick="loadConnectionEvents(${offset + limit}, ${limit})">下一页</button>
+                </div>
+            </div>
+        `;
+    }
+
+    if (!events || events.length === 0) {
+        container.innerHTML = `
+            <div style="margin-bottom: 10px;">${statItems || '<span style="font-size: 0.85em; color: #6c757d;">暂无统计</span>'}</div>
+            <p class="empty-text" style="color: #6c757d; padding: 10px 0;">暂无连接事件日志。</p>
+            ${paginationHtml}
+        `;
+        return;
+    }
+
+    const rows = events.map(e => {
+        const color = eventTypeColors[e.event_type] || '#6c757d';
+        const label = e.event_label || eventLabels[e.event_type] || e.event_type;
+        const mountCell = e.mount_name ? `<td>${escapeHtml(e.mount_name)}</td>` : '<td>-</td>';
+        const userCell = e.username ? `<td>${escapeHtml(e.username)}</td>` : '<td>-</td>';
+        const ipCell = e.ip_address ? `<td>${escapeHtml(e.ip_address)}</td>` : '<td>-</td>';
+        const durationCell = e.duration ? `<td>${e.duration} 秒</td>` : '<td>-</td>';
+        const reasonCell = e.reason ? `<td>${escapeHtml(e.reason)}</td>` : '<td>-</td>';
+        return `
+            <tr>
+                <td style="color: ${color}; font-weight: bold;">${label}</td>
+                ${mountCell}
+                ${userCell}
+                ${ipCell}
+                <td>${escapeHtml(e.event_time)}</td>
+                ${durationCell}
+                ${reasonCell}
+            </tr>
+        `;
+    }).join('');
+
+    const html = `
+        <div style="margin-bottom: 10px;">${statItems || '<span style="font-size: 0.85em; color: #6c757d;">暂无统计</span>'}</div>
+        <div class="table-container" style="max-height: 500px; overflow-y: auto;">
+            <table class="data-table" style="min-width: 600px;">
+                <thead>
+                    <tr>
+                        <th>事件类型</th>
+                        <th>挂载点</th>
+                        <th>用户名</th>
+                        <th>IP 地址</th>
+                        <th>时间</th>
+                        <th>持续时长</th>
+                        <th>原因</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows}
+                </tbody>
+            </table>
+        </div>
+        ${paginationHtml}
+    `;
+
+    container.innerHTML = html;
 }

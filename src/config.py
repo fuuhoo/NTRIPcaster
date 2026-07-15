@@ -161,6 +161,7 @@ MAX_BUFFER_SIZE = get_config_value('network', 'max_buffer_size', 655360, int) # 
 DATABASE_PATH = get_config_value('database', 'path', '2rtk.db')
 DB_POOL_SIZE = get_config_value('database', 'pool_size', 10, int)
 DB_TIMEOUT = get_config_value('database', 'timeout', 30, int)
+DB_RETENTION_DAYS = get_config_value('database', 'retention_days', 365, int)  # 连接事件日志保留天数，默认1年
 
 # ==================== 日志配置 ====================
 

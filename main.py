@@ -130,6 +130,8 @@ class ServiceManager:
         self.last_network_stats = None
         self.print_stats = False  # 控制是否在控制台打印统计信息
         self.system_stats_cache = {}  # 缓存系统统计数据供Web API使用
+        self.cleanup_thread = None  # 连接事件日志清理线程
+        self.cleanup_interval = 7 * 24 * 3600  # 清理间隔（秒），默认每周一次
         
     def start_all_services(self):
         """启动所有服务"""
@@ -168,6 +170,9 @@ class ServiceManager:
             
             # 启动统计监控线程
             self._start_stats_monitor()
+            
+            # 启动数据库清理线程（定时清理旧连接事件日志）
+            self._start_cleanup_worker()
             
             # 主循环 - 保持服务运行
             self._main_loop()
@@ -208,6 +213,29 @@ class ServiceManager:
         """启动统计监控线程"""
         self.stats_thread = Thread(target=self._stats_monitor_worker, daemon=True)
         self.stats_thread.start()
+    
+    def _start_cleanup_worker(self):
+        """启动数据库清理线程（定期删除超过保留期限的连接事件日志）"""
+        self.cleanup_thread = Thread(target=self._cleanup_worker, daemon=True)
+        self.cleanup_thread.start()
+        logger.log_system_event(f'已启动连接事件日志清理线程，保留天数: {config.DB_RETENTION_DAYS}，清理周期: 每周一次')
+    
+    def _cleanup_worker(self):
+        """数据库清理工作线程"""
+        # 首次运行时立即执行一次清理，避免重启前积累的过期数据
+        try:
+            if self.db_manager:
+                self.db_manager.cleanup_old_connection_events(config.DB_RETENTION_DAYS)
+        except Exception as e:
+            logger.log_error(f'首次清理连接事件日志失败: {e}', exc_info=True)
+        
+        while self.running:
+            try:
+                time.sleep(self.cleanup_interval)
+                if self.running and self.db_manager:
+                    self.db_manager.cleanup_old_connection_events(config.DB_RETENTION_DAYS)
+            except Exception as e:
+                logger.log_error(f'定时清理连接事件日志失败: {e}', exc_info=True)
  
     def _stats_monitor_worker(self):
         """统计监控工作线程"""

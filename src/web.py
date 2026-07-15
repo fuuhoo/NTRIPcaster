@@ -307,6 +307,101 @@ class WebManager:
                 log_error(f"获取匿名访问设置失败: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
         
+        @self.app.route('/api/notification/bots', methods=['GET'])
+        @self.require_login
+        def api_get_notification_bots():
+            """获取消息机器人配置列表"""
+            try:
+                bots = self.db_manager.get_all_notification_bots()
+                return jsonify({
+                    'success': True,
+                    'bots': bots
+                })
+            except Exception as e:
+                log_error(f"获取消息机器人配置失败: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+        
+        @self.app.route('/api/notification/bots', methods=['POST'])
+        @self.require_login
+        def api_add_notification_bot():
+            """添加消息机器人配置"""
+            try:
+                data = request.get_json()
+                if not data:
+                    return jsonify({'success': False, 'error': '请求数据格式错误'}), 400
+                
+                name = data.get('name', '').strip()
+                platform = data.get('platform', '').strip().lower()
+                webhook_url = data.get('webhook_url', '').strip()
+                enabled = bool(data.get('enabled', True))
+                events = data.get('events', [])
+                
+                if not name:
+                    return jsonify({'success': False, 'error': '机器人名称不能为空'}), 400
+                if platform not in ('dingtalk', 'wecom'):
+                    return jsonify({'success': False, 'error': '请选择正确的平台（钉钉或企业微信）'}), 400
+                if not webhook_url:
+                    return jsonify({'success': False, 'error': 'Webhook 地址不能为空'}), 400
+                if not events or not isinstance(events, list):
+                    return jsonify({'success': False, 'error': '请至少选择一个消息类型'}), 400
+                
+                success, message = self.db_manager.add_notification_bot(name, platform, webhook_url, enabled, events)
+                if success:
+                    log_system_event(f"消息机器人配置已添加: {name} ({platform})")
+                    return jsonify({'success': True, 'message': message}), 201
+                else:
+                    return jsonify({'success': False, 'error': message}), 400
+            except Exception as e:
+                log_error(f"添加消息机器人配置失败: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+        
+        @self.app.route('/api/notification/bots/<int:bot_id>', methods=['PUT', 'DELETE'])
+        @self.require_login
+        def api_notification_bot_detail(bot_id):
+            """更新或删除消息机器人配置"""
+            if request.method == 'PUT':
+                try:
+                    data = request.get_json()
+                    if not data:
+                        return jsonify({'success': False, 'error': '请求数据格式错误'}), 400
+                    
+                    name = data.get('name', '').strip()
+                    platform = data.get('platform', '').strip().lower()
+                    webhook_url = data.get('webhook_url', '').strip()
+                    enabled = bool(data.get('enabled', True))
+                    events = data.get('events', [])
+                    
+                    if not name:
+                        return jsonify({'success': False, 'error': '机器人名称不能为空'}), 400
+                    if platform not in ('dingtalk', 'wecom'):
+                        return jsonify({'success': False, 'error': '请选择正确的平台'}), 400
+                    if not webhook_url:
+                        return jsonify({'success': False, 'error': 'Webhook 地址不能为空'}), 400
+                    if not events or not isinstance(events, list):
+                        return jsonify({'success': False, 'error': '请至少选择一个消息类型'}), 400
+                    
+                    success, message = self.db_manager.update_notification_bot(bot_id, name, platform, webhook_url, enabled, events)
+                    if success:
+                        log_system_event(f"消息机器人配置已更新: {name} (ID: {bot_id})")
+                        return jsonify({'success': True, 'message': message})
+                    else:
+                        return jsonify({'success': False, 'error': message}), 400
+                except Exception as e:
+                    log_error(f"更新消息机器人配置失败: {e}")
+                    return jsonify({'success': False, 'error': str(e)}), 500
+            
+            elif request.method == 'DELETE':
+                try:
+                    success, message = self.db_manager.delete_notification_bot(bot_id)
+                    if success:
+                        log_system_event(f"消息机器人配置已删除 (ID: {bot_id})")
+                        return jsonify({'success': True, 'message': message})
+                    else:
+                        return jsonify({'success': False, 'error': message}), 400
+                except Exception as e:
+                    log_error(f"删除消息机器人配置失败: {e}")
+                    return jsonify({'success': False, 'error': str(e)}), 500
+        
         @self.app.route('/api/settings/anonymous', methods=['POST'])
         @self.require_login
         def api_set_anonymous_setting():
@@ -1172,6 +1267,57 @@ class WebManager:
                     }), 404
             except Exception as e:
                 log_error(f"获取挂载点{mount_name}历史数据失败: {e}")
+                return jsonify({'error': str(e)}), 500
+        
+        @self.app.route('/api/connection_events', methods=['GET'])
+        @self.require_login
+        def api_connection_events():
+            """获取连接事件日志（基站/挂载点/用户上下线记录）"""
+            try:
+                limit = request.args.get('limit', 100, type=int)
+                if limit < 1 or limit > 1000:
+                    limit = 100
+                
+                offset = request.args.get('offset', 0, type=int)
+                if offset < 0:
+                    offset = 0
+                
+                event_type = request.args.get('event_type') or None
+                mount_name = request.args.get('mount_name') or None
+                username = request.args.get('username') or None
+                start_time = request.args.get('start_time') or None
+                end_time = request.args.get('end_time') or None
+                
+                events = self.db_manager.get_connection_events(
+                    limit=limit,
+                    offset=offset,
+                    event_type=event_type,
+                    mount_name=mount_name,
+                    username=username,
+                    start_time=start_time,
+                    end_time=end_time
+                )
+                
+                total = self.db_manager.get_connection_events_count(
+                    event_type=event_type,
+                    mount_name=mount_name,
+                    username=username,
+                    start_time=start_time,
+                    end_time=end_time
+                )
+                
+                stats = self.db_manager.get_connection_events_statistics(start_time, end_time)
+                
+                return jsonify({
+                    'success': True,
+                    'events': events,
+                    'statistics': stats,
+                    'total': total,
+                    'limit': limit,
+                    'offset': offset
+                })
+            except Exception as e:
+                log_error(f"获取连接事件日志失败: {e}")
                 return jsonify({'error': str(e)}), 500
 
     

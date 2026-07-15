@@ -56,4 +56,6 @@ Thumbs.db
 
 # Temporary / local scripts
 late_app_js.py
-translate_app.js.py
+translate_app_js.py
+cleanup.py
+events.js

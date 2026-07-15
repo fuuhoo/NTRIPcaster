@@ -14,6 +14,8 @@ from . import config
 from . import logger
 from .logger import log_system_event, log_error, log_warning, log_info, log_debug
 from .rtcm2_manager import parser_manager as rtcm_manager  # 导入RTCM2解析管理器
+from . import notification  # 导入通知模块
+from . import database  # 导入数据库模块，用于记录上下线事件
 
 @dataclass
 class MountInfo:
@@ -229,6 +231,17 @@ class ConnectionManager:
             log_info(f"挂载点 {mount_name} 已上线，IP: {ip_address}当前在线挂载点数量: {len(self.online_mounts)}")
             log_debug(f"挂载点 {mount_name} 连接成功，初始状态: {mount_info.status}, 连接时间: {mount_info.connect_datetime}")
             
+            # 触发基站/挂载点上传端上线通知
+            notification.notify_base_station_online(mount_name, ip_address, mount_info.connect_datetime)
+            
+            # 记录基站上线事件到数据库
+            database.add_connection_event(
+                event_type='base_station_online',
+                mount_name=mount_name,
+                ip_address=ip_address,
+                details=f'首次连接时间: {mount_info.connect_datetime}'
+            )
+            
             self.print_active_connections()
             
             return True, "Mount point connected successfully"
@@ -258,6 +271,25 @@ class ConnectionManager:
                     actual_reason = "异常离线"
                 
                 del self.online_mounts[mount_name]
+                
+                # 触发基站/挂载点上传端下线通知
+                notification.notify_base_station_offline(
+                    mount_name,
+                    mount_info.ip_address,
+                    mount_info.connect_datetime,
+                    uptime=round(mount_info.uptime, 1),
+                    reason=actual_reason
+                )
+                
+                # 记录基站下线事件到数据库
+                database.add_connection_event(
+                    event_type='base_station_offline',
+                    mount_name=mount_name,
+                    ip_address=mount_info.ip_address,
+                    duration=round(mount_info.uptime, 1),
+                    reason=actual_reason,
+                    details=f'连接时间: {mount_info.connect_datetime}, 总字节数: {mount_info.total_bytes}, 数据速率: {mount_info.data_rate:.2f} B/s'
+                )
                 
                 log_info(f"挂载点 {mount_name} 已下线，连接时长: {mount_info.uptime:.1f}秒，原因: {actual_reason}")
                 log_debug(f"挂载点 {mount_name} 移除完成，剩余在线挂载点数量: {len(self.online_mounts)}")
@@ -363,6 +395,24 @@ class ConnectionManager:
             log_info(f"用户 {username} IP: {ip_address} 已连接，从挂载点 {mount_name}开始订阅RTCM数据")
             log_debug(f"用户连接统计更新 - 用户 {username}: {old_user_count} -> {self.user_connection_count[username]}, 挂载点 {mount_name}: {old_mount_count} -> {self.mount_connection_count[mount_name]}")
             log_debug(f"连接ID生成: {connection_id}, 总在线用户数: {len(self.online_users)}")
+            
+            # 触发用户挂载点连接上线通知
+            notification.notify_mount_online(
+                mount_name,
+                ip_address,
+                username=username,
+                connect_time=connection_info['connect_datetime']
+            )
+            
+            # 记录用户挂载点连接上线事件到数据库
+            database.add_connection_event(
+                event_type='mount_online',
+                mount_name=mount_name,
+                username=username,
+                ip_address=ip_address,
+                details=f"连接时间: {connection_info['connect_datetime']}"
+            )
+            
             return connection_id
     
     def remove_user_connection(self, username, connection_id=None, mount_name=None):
@@ -393,6 +443,28 @@ class ConnectionManager:
                             conn['client_socket'].close()
                         except:
                             pass
+                    
+                    # 触发用户挂载点连接下线通知
+                    uptime = round(time.time() - conn.get('connect_time', time.time()), 1)
+                    notification.notify_mount_offline(
+                        conn['mount_name'],
+                        conn['ip_address'],
+                        username=username,
+                        connect_time=conn.get('connect_datetime', '未知'),
+                        uptime=uptime,
+                        reason="主动断开"
+                    )
+                    
+                    # 记录用户挂载点连接下线事件到数据库
+                    database.add_connection_event(
+                        event_type='mount_offline',
+                        mount_name=conn['mount_name'],
+                        username=username,
+                        ip_address=conn['ip_address'],
+                        duration=uptime,
+                        reason="主动断开",
+                        details=f"连接时间: {conn.get('connect_datetime', '未知')}"
+                    )
                     
                     log_info(f"用户 {username} 已从挂载点 {conn['mount_name']} 断开")
             

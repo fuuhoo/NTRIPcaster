@@ -70,6 +70,52 @@ def init_db():
         )
         ''')
         
+        # 消息机器人表
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS notification_bots (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            platform TEXT NOT NULL CHECK(platform IN ('dingtalk', 'wecom')),
+            webhook_url TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        # 消息机器人订阅事件表
+        # 事件类型：base_station_online（基站上线）、base_station_offline（基站下线）、
+        #           mount_online（挂载点/用户连接上线）、mount_offline（挂载点/用户连接下线）
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS notification_events (
+            id INTEGER PRIMARY KEY,
+            bot_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            FOREIGN KEY (bot_id) REFERENCES notification_bots(id)
+                ON DELETE CASCADE
+        )
+        ''')
+        
+        # 连接事件日志表（基站/挂载点/用户连接上下线记录）
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS connection_events (
+            id INTEGER PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            mount_name TEXT,
+            username TEXT,
+            ip_address TEXT,
+            event_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            duration REAL,
+            reason TEXT,
+            details TEXT
+        )
+        ''')
+        
+        # 为常用查询字段创建索引
+        c.execute('CREATE INDEX IF NOT EXISTS idx_connection_events_event_type ON connection_events(event_type)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_connection_events_mount_name ON connection_events(mount_name)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_connection_events_username ON connection_events(username)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_connection_events_event_time ON connection_events(event_time)')
+        
         c.execute("SELECT * FROM admins")
         if not c.fetchone():
             # 使用哈希密码存储默认管理员密码
@@ -211,6 +257,201 @@ def update_user(user_id, username, password):
             return False, f"更新用户失败: {e}"
         finally:
             conn.close()
+
+# ==================== 消息机器人配置管理 ====================
+
+def get_all_notification_bots():
+    """获取所有消息机器人配置，包含订阅事件类型"""
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            c.execute('''
+                SELECT id, name, platform, webhook_url, enabled, created_at
+                FROM notification_bots
+                ORDER BY id
+            ''')
+            bots = c.fetchall()
+            
+            c.execute('SELECT bot_id, event_type FROM notification_events')
+            events = c.fetchall()
+            
+            bot_events = {}
+            for bot_id, event_type in events:
+                bot_events.setdefault(bot_id, []).append(event_type)
+            
+            result = []
+            for bot in bots:
+                result.append({
+                    'id': bot[0],
+                    'name': bot[1],
+                    'platform': bot[2],
+                    'webhook_url': bot[3],
+                    'enabled': bool(bot[4]),
+                    'created_at': bot[5],
+                    'events': bot_events.get(bot[0], [])
+                })
+            return result
+        finally:
+            conn.close()
+
+
+def get_notification_bots():
+    """获取所有启用的消息机器人配置，包含订阅事件类型"""
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            c.execute('''
+                SELECT id, name, platform, webhook_url, enabled
+                FROM notification_bots
+                WHERE enabled = 1
+                ORDER BY id
+            ''')
+            bots = c.fetchall()
+            
+            c.execute('SELECT bot_id, event_type FROM notification_events')
+            events = c.fetchall()
+            
+            bot_events = {}
+            for bot_id, event_type in events:
+                bot_events.setdefault(bot_id, []).append(event_type)
+            
+            result = []
+            for bot in bots:
+                result.append({
+                    'id': bot[0],
+                    'name': bot[1],
+                    'platform': bot[2],
+                    'webhook_url': bot[3],
+                    'enabled': bool(bot[4]),
+                    'events': bot_events.get(bot[0], [])
+                })
+            return result
+        finally:
+            conn.close()
+
+
+def add_notification_bot(name, platform, webhook_url, enabled, events):
+    """添加消息机器人配置
+    
+    Args:
+        name: 机器人名称
+        platform: 平台类型 'dingtalk' 或 'wecom'
+        webhook_url: Webhook 地址
+        enabled: 是否启用
+        events: 订阅事件类型列表，如 ['mount_online', 'mount_offline']
+    """
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            if platform not in ('dingtalk', 'wecom'):
+                return False, "不支持的机器人平台"
+            
+            allowed_events = {
+                'base_station_online', 'base_station_offline',
+                'mount_online', 'mount_offline'
+            }
+            valid_events = []
+            for event in events:
+                if event in allowed_events:
+                    valid_events.append(event)
+                else:
+                    return False, f"无效的事件类型: {event}"
+            
+            c.execute('''
+                INSERT INTO notification_bots (name, platform, webhook_url, enabled)
+                VALUES (?, ?, ?, ?)
+            ''', (name, platform, webhook_url, 1 if enabled else 0))
+            bot_id = c.lastrowid
+            
+            for event in valid_events:
+                c.execute('''
+                    INSERT INTO notification_events (bot_id, event_type)
+                    VALUES (?, ?)
+                ''', (bot_id, event))
+            
+            conn.commit()
+            log_database_operation('add_notification_bot', 'notification_bots', True, f'机器人: {name}, 平台: {platform}')
+            return True, "机器人添加成功"
+        except Exception as e:
+            log_database_operation('add_notification_bot', 'notification_bots', False, str(e))
+            return False, f"添加机器人失败: {e}"
+        finally:
+            conn.close()
+
+
+def update_notification_bot(bot_id, name, platform, webhook_url, enabled, events):
+    """更新消息机器人配置"""
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            c.execute('SELECT id FROM notification_bots WHERE id = ?', (bot_id,))
+            if not c.fetchone():
+                return False, "机器人不存在"
+            
+            if platform not in ('dingtalk', 'wecom'):
+                return False, "不支持的机器人平台"
+            
+            allowed_events = {
+                'base_station_online', 'base_station_offline',
+                'mount_online', 'mount_offline'
+            }
+            valid_events = []
+            for event in events:
+                if event in allowed_events:
+                    valid_events.append(event)
+                else:
+                    return False, f"无效的事件类型: {event}"
+            
+            c.execute('''
+                UPDATE notification_bots
+                SET name = ?, platform = ?, webhook_url = ?, enabled = ?
+                WHERE id = ?
+            ''', (name, platform, webhook_url, 1 if enabled else 0, bot_id))
+            
+            c.execute('DELETE FROM notification_events WHERE bot_id = ?', (bot_id,))
+            
+            for event in valid_events:
+                c.execute('''
+                    INSERT INTO notification_events (bot_id, event_type)
+                    VALUES (?, ?)
+                ''', (bot_id, event))
+            
+            conn.commit()
+            log_database_operation('update_notification_bot', 'notification_bots', True, f'机器人ID: {bot_id}')
+            return True, "机器人更新成功"
+        except Exception as e:
+            log_database_operation('update_notification_bot', 'notification_bots', False, str(e))
+            return False, f"更新机器人失败: {e}"
+        finally:
+            conn.close()
+
+
+def delete_notification_bot(bot_id):
+    """删除消息机器人配置"""
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            c.execute('SELECT name FROM notification_bots WHERE id = ?', (bot_id,))
+            result = c.fetchone()
+            if not result:
+                return False, "机器人不存在"
+            
+            name = result[0]
+            c.execute('DELETE FROM notification_bots WHERE id = ?', (bot_id,))
+            conn.commit()
+            log_database_operation('delete_notification_bot', 'notification_bots', True, f'机器人: {name}')
+            return True, "机器人删除成功"
+        except Exception as e:
+            log_database_operation('delete_notification_bot', 'notification_bots', False, str(e))
+            return False, f"删除机器人失败: {e}"
+        finally:
+            conn.close()
+
 
 def delete_user(user_id):
     """删除用户"""
@@ -426,6 +667,218 @@ def update_admin_password(username, new_password):
             conn.close()
 
 
+# ==================== 连接事件日志管理 ====================
+
+def add_connection_event(event_type, mount_name=None, username=None, ip_address=None, duration=None, reason=None, details=None):
+    """记录连接事件日志（基站/挂载点/用户连接上下线）
+    
+    Args:
+        event_type: 事件类型，如 'base_station_online', 'base_station_offline',
+                    'mount_online', 'mount_offline'
+        mount_name: 挂载点名称
+        username: 用户名
+        ip_address: IP 地址
+        duration: 连接时长（秒），下线事件时填写
+        reason: 下线原因
+        details: 额外详情（JSON 字符串等）
+    """
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            c.execute('''
+                INSERT INTO connection_events
+                (event_type, mount_name, username, ip_address, duration, reason, details)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (event_type, mount_name, username, ip_address, duration, reason, details))
+            conn.commit()
+            return True, c.lastrowid
+        except Exception as e:
+            log_error(f'记录连接事件失败: {e}', exc_info=True)
+            return False, str(e)
+        finally:
+            conn.close()
+
+
+def get_connection_events_count(event_type=None, mount_name=None, username=None, start_time=None, end_time=None):
+    """获取连接事件日志总数（用于分页）"""
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            query = 'SELECT COUNT(*) FROM connection_events WHERE 1=1'
+            params = []
+            if event_type:
+                query += ' AND event_type = ?'
+                params.append(event_type)
+            if mount_name:
+                query += ' AND mount_name = ?'
+                params.append(mount_name)
+            if username:
+                query += ' AND username = ?'
+                params.append(username)
+            if start_time:
+                query += ' AND event_time >= ?'
+                params.append(start_time)
+            if end_time:
+                query += ' AND event_time <= ?'
+                params.append(end_time)
+            c.execute(query, params)
+            return c.fetchone()[0]
+        finally:
+            conn.close()
+
+
+def cleanup_old_connection_events(retention_days=365, max_records=100000):
+    """清理连接事件日志
+    
+    策略：
+    1. 删除超过保留天数的记录（按 event_time 计算）。
+    2. 如果总条数仍超过 max_records，删除最旧的记录，直到总数 <= max_records。
+    
+    Args:
+        retention_days: 保留天数，默认365天（1年）
+        max_records: 最大保留记录数，默认100000条
+    """
+    if retention_days <= 0:
+        log_warning('连接事件日志保留天数配置无效，跳过清理')
+        return 0
+    
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        total_deleted = 0
+        try:
+            # 1. 按时间删除超过保留期限的记录
+            c.execute('''
+                DELETE FROM connection_events
+                WHERE event_time < datetime('now', ?)
+            ''', (f'-{retention_days} days',))
+            deleted_by_time = c.rowcount
+            total_deleted += deleted_by_time
+            
+            # 2. 按数量限制删除最旧的记录（允许一周误差，因此优先保留时间更早一周的阈值）
+            # 实际逻辑：保留最近 365 天的记录，同时保证总条数不超过 max_records
+            c.execute('SELECT COUNT(*) FROM connection_events')
+            current_count = c.fetchone()[0]
+            if current_count > max_records:
+                overflow = current_count - max_records
+                c.execute('''
+                    DELETE FROM connection_events
+                    WHERE id IN (
+                        SELECT id FROM connection_events
+                        ORDER BY event_time ASC
+                        LIMIT ?
+                    )
+                ''', (overflow,))
+                deleted_by_count = c.rowcount
+                total_deleted += deleted_by_count
+            else:
+                deleted_by_count = 0
+            
+            conn.commit()
+            if total_deleted > 0:
+                log_info(f'已清理 {total_deleted} 条连接事件日志（按时间 {deleted_by_time} 条，按数量 {deleted_by_count} 条），当前保留 {max_records} 条以内')
+                log_database_operation('cleanup_old_connection_events', 'connection_events', True, f'删除 {total_deleted} 条记录')
+            return total_deleted
+        except Exception as e:
+            log_error(f'清理连接事件日志失败: {e}', exc_info=True)
+            log_database_operation('cleanup_old_connection_events', 'connection_events', False, str(e))
+            return 0
+        finally:
+            conn.close()
+
+
+def get_connection_events(limit=100, offset=0, event_type=None, mount_name=None, username=None, start_time=None, end_time=None):
+    """获取连接事件日志列表
+    
+    Args:
+        limit: 返回最大条数
+        offset: 偏移量，用于分页
+        event_type: 按事件类型筛选
+        mount_name: 按挂载点名称筛选
+        username: 按用户名筛选
+        start_time: 开始时间（格式 'YYYY-MM-DD HH:MM:SS'）
+        end_time: 结束时间（格式 'YYYY-MM-DD HH:MM:SS'）
+    """
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            query = '''
+                SELECT id, event_type, mount_name, username, ip_address, event_time, duration, reason, details
+                FROM connection_events
+                WHERE 1=1
+            '''
+            params = []
+            if event_type:
+                query += ' AND event_type = ?'
+                params.append(event_type)
+            if mount_name:
+                query += ' AND mount_name = ?'
+                params.append(mount_name)
+            if username:
+                query += ' AND username = ?'
+                params.append(username)
+            if start_time:
+                query += ' AND event_time >= ?'
+                params.append(start_time)
+            if end_time:
+                query += ' AND event_time <= ?'
+                params.append(end_time)
+            query += ' ORDER BY event_time DESC LIMIT ? OFFSET ?'
+            params.append(limit)
+            params.append(offset)
+            
+            c.execute(query, params)
+            rows = c.fetchall()
+            
+            result = []
+            event_labels = {
+                'base_station_online': '基站上线',
+                'base_station_offline': '基站下线',
+                'mount_online': '挂载点上线',
+                'mount_offline': '挂载点下线'
+            }
+            for row in rows:
+                result.append({
+                    'id': row[0],
+                    'event_type': row[1],
+                    'event_label': event_labels.get(row[1], row[1]),
+                    'mount_name': row[2],
+                    'username': row[3],
+                    'ip_address': row[4],
+                    'event_time': row[5],
+                    'duration': row[6],
+                    'reason': row[7],
+                    'details': row[8]
+                })
+            return result
+        finally:
+            conn.close()
+
+
+def get_connection_events_statistics(start_time=None, end_time=None):
+    """获取连接事件统计信息"""
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            query = 'SELECT event_type, COUNT(*) FROM connection_events WHERE 1=1'
+            params = []
+            if start_time:
+                query += ' AND event_time >= ?'
+                params.append(start_time)
+            if end_time:
+                query += ' AND event_time <= ?'
+                params.append(end_time)
+            query += ' GROUP BY event_type'
+            c.execute(query, params)
+            return {row[0]: row[1] for row in c.fetchall()}
+        finally:
+            conn.close()
+
+
 class DatabaseManager:
     """数据库管理器类，包装数据库操作函数"""
     
@@ -563,4 +1016,44 @@ class DatabaseManager:
     def update_admin_password(self, username, new_password):
         """更新管理员密码"""
         return update_admin_password(username, new_password)
+    
+    def get_all_notification_bots(self):
+        """获取所有消息机器人配置"""
+        return get_all_notification_bots()
+    
+    def get_notification_bots(self):
+        """获取所有启用的消息机器人配置"""
+        return get_notification_bots()
+    
+    def add_notification_bot(self, name, platform, webhook_url, enabled, events):
+        """添加消息机器人配置"""
+        return add_notification_bot(name, platform, webhook_url, enabled, events)
+    
+    def update_notification_bot(self, bot_id, name, platform, webhook_url, enabled, events):
+        """更新消息机器人配置"""
+        return update_notification_bot(bot_id, name, platform, webhook_url, enabled, events)
+    
+    def delete_notification_bot(self, bot_id):
+        """删除消息机器人配置"""
+        return delete_notification_bot(bot_id)
+    
+    def add_connection_event(self, event_type, mount_name=None, username=None, ip_address=None, duration=None, reason=None, details=None):
+        """记录连接事件日志"""
+        return add_connection_event(event_type, mount_name, username, ip_address, duration, reason, details)
+    
+    def get_connection_events(self, limit=100, offset=0, event_type=None, mount_name=None, username=None, start_time=None, end_time=None):
+        """获取连接事件日志列表"""
+        return get_connection_events(limit, offset, event_type, mount_name, username, start_time, end_time)
+    
+    def get_connection_events_statistics(self, start_time=None, end_time=None):
+        """获取连接事件统计"""
+        return get_connection_events_statistics(start_time, end_time)
+    
+    def get_connection_events_count(self, event_type=None, mount_name=None, username=None, start_time=None, end_time=None):
+        """获取连接事件日志总数"""
+        return get_connection_events_count(event_type, mount_name, username, start_time, end_time)
+    
+    def cleanup_old_connection_events(self, retention_days=365, max_records=100000):
+        """清理连接事件日志"""
+        return cleanup_old_connection_events(retention_days, max_records)
     
