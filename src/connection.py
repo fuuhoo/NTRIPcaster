@@ -374,6 +374,9 @@ class ConnectionManager:
                 'connect_datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'last_activity': time.time(),
                 'bytes_sent': 0,
+                'diff_start_time': None,
+                'gga_quality': None,
+                'gga_last_update': None,
                 'client_socket': client_socket
             }
             
@@ -503,11 +506,18 @@ class ConnectionManager:
                     old_bytes = conn['bytes_sent']
                     conn['last_activity'] = time.time()
                     conn['bytes_sent'] += bytes_sent
-                    connection_found = True
+                    if old_bytes == 0 and bytes_sent > 0 and conn['diff_start_time'] is None:
+                        conn['diff_start_time'] = time.time()
                     
-                    # 移除频繁的用户活动更新debug日志，避免刷屏
-                    # if bytes_sent > 0:
-                    #     log_debug(f"用户 {username} 信息更新: 连接ID={connection_id}, 本次发送={bytes_sent}B, 累计发送={conn['bytes_sent']}B (原{old_bytes}B), 挂载点={conn['mount_name']}")
+                    # 实时计算并存储数据速率 (B/s)
+                    diff_start = conn.get('diff_start_time') or conn['connect_time']
+                    elapsed = time.time() - diff_start
+                    if elapsed > 0:
+                        conn['data_rate'] = conn['bytes_sent'] / elapsed
+                    else:
+                        conn['data_rate'] = 0.0
+                    
+                    connection_found = True
                     break
             
             if not connection_found:
@@ -516,6 +526,35 @@ class ConnectionManager:
             
             return True
     
+    def update_gga_quality(self, username, connection_id, quality):
+        """更新用户连接的GGA定位质量码"""
+        with self.user_lock:
+            if username not in self.online_users:
+                return False
+            
+            for conn in self.online_users[username]:
+                if conn['connection_id'] == connection_id:
+                    conn['gga_quality'] = quality
+                    conn['gga_last_update'] = time.time()
+                    return True
+            return False
+    
+    def get_user_connection_gga_quality(self, username, connection_id):
+        """获取用户连接的GGA定位质量码"""
+        with self.user_lock:
+            if username not in self.online_users:
+                return None
+            
+            for conn in self.online_users[username]:
+                if conn['connection_id'] == connection_id:
+                    quality = conn.get('gga_quality')
+                    # Check if GGA data is stale (older than 30 seconds)
+                    last_update = conn.get('gga_last_update')
+                    if quality is not None and last_update is not None:
+                        if time.time() - last_update <= 30:
+                            return quality
+                    return None
+            return None
     def is_mount_online(self, mount_name):
         """检查挂载点是否在线"""
         with self.mount_lock:
@@ -557,6 +596,70 @@ class ConnectionManager:
     def get_user_connections(self, username):
         """获取用户连接信息"""
         return self.online_users.get(username, [])
+    
+    def get_all_user_connections(self, mount_name=None, username=None):
+        """获取所有移动站连接列表，支持按挂载点和用户名筛选"""
+        with self.user_lock:
+            connections = []
+            for user, conn_list in self.online_users.items():
+                for conn in conn_list:
+                    if mount_name and conn.get('mount_name') != mount_name:
+                        continue
+                    if username and conn.get('username') != username:
+                        continue
+                    conn_copy = conn.copy()
+                    conn_copy.pop('client_socket', None)
+                    connections.append(conn_copy)
+            return connections
+
+    def is_user_connection_diffing(self, username, connection_id):
+        """判断用户连接是否正在进行差分
+        
+        规则：连接存在、已经发送过数据（bytes_sent > 0）、
+              且最后一次数据发送活动在最近 DIFFING_TIMEOUT 秒内
+        """
+        diffing_timeout = getattr(config, 'DIFFING_TIMEOUT', 10)
+        
+        with self.user_lock:
+            if username not in self.online_users:
+                return False
+            for conn in self.online_users[username]:
+                if conn['connection_id'] == connection_id:
+                    if conn['bytes_sent'] <= 0:
+                        return False
+                    if conn['last_activity'] is None:
+                        return False
+                    return time.time() - conn['last_activity'] <= diffing_timeout
+            return False
+
+    def get_user_connection_data_rate(self, username, connection_id):
+        """获取用户连接的当前数据速率（B/s）"""
+        with self.user_lock:
+            if username not in self.online_users:
+                return 0.0
+            for conn in self.online_users[username]:
+                if conn['connection_id'] == connection_id:
+                    diff_start = conn.get('diff_start_time') or conn['connect_time']
+                    elapsed = time.time() - diff_start
+                    if elapsed > 0:
+                        return conn['bytes_sent'] / elapsed
+                    return 0.0
+            return 0.0
+
+    def get_user_connection_mounts(self, username):
+        """获取用户当前连接的所有挂载点（去重）"""
+        with self.user_lock:
+            if username not in self.online_users:
+                return []
+            mounts = set()
+            for conn in self.online_users[username]:
+                mounts.add(conn['mount_name'])
+            return sorted(mounts)
+
+    def get_all_online_mount_names(self):
+        """获取所有在线挂载点名称列表"""
+        with self.mount_lock:
+            return sorted(self.online_mounts.keys())
     
     def get_mount_statistics(self, mount_name: str) -> Optional[Dict[str, Any]]:
         """获取挂载点统计信息"""
@@ -900,6 +1003,22 @@ def get_user_connection_count(username):
     """获取用户连接数"""
     return get_connection_manager().get_user_connection_count(username)
 
+def is_user_connection_diffing(username, connection_id):
+    """判断用户连接是否正在差分"""
+    return get_connection_manager().is_user_connection_diffing(username, connection_id)
+
+def get_user_connection_data_rate(username, connection_id):
+    """获取用户连接数据速率"""
+    return get_connection_manager().get_user_connection_data_rate(username, connection_id)
+
+def get_user_connection_mounts(username):
+    """获取用户连接挂载点列表"""
+    return get_connection_manager().get_user_connection_mounts(username)
+
+def get_all_online_mount_names():
+    """获取所有在线挂载点名称"""
+    return get_connection_manager().get_all_online_mount_names()
+
 def update_mount_data(mount_name, data_size):
     """更新挂载点数据"""
     return get_connection_manager().update_mount_data(mount_name, data_size)
@@ -923,3 +1042,12 @@ def generate_mount_list():
 def check_mount_exists(mount_name):
     """检查挂载点是否存在"""
     return get_connection_manager().check_mount_exists(mount_name)
+
+def update_gga_quality(username, connection_id, quality):
+    """更新用户连接GGA质量码"""
+    return get_connection_manager().update_gga_quality(username, connection_id, quality)
+
+def get_user_connection_gga_quality(username, connection_id):
+    """获取用户连接GGA质量码"""
+    return get_connection_manager().get_user_connection_gga_quality(username, connection_id)
+

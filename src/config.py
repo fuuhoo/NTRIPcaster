@@ -212,6 +212,9 @@ MOUNT_TIMEOUT = get_config_value('ntrip', 'mount_timeout', 1800, int)  # 30分�
 CLIENT_TIMEOUT = get_config_value('ntrip', 'client_timeout', 300, int)  # 5分钟
 CONNECTION_TIMEOUT = get_config_value('ntrip', 'connection_timeout', 1800, int)  # 连接超时时间 (秒)
 
+# 差分判断超时时间（秒）：在此时间内没有数据发送则判定为未差分
+DIFFING_TIMEOUT = get_config_value('ntrip', 'diffing_timeout', 10, int)
+
 # ==================== TCP配置 ====================
 
 # TCP Keep-Alive配置

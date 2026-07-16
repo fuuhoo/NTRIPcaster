@@ -1106,6 +1106,17 @@ a=control:*
                 except:
                     pass
                 return
+            
+            # 匿名访问模式下，如果挂载点尚未在数据库中注册，则自动注册
+            # 这样管理页面才能看到并使用该挂载点
+            if config.ALLOW_ANONYMOUS and not self.db_manager.check_mount_exists_in_db(mount):
+                import secrets
+                random_password = secrets.token_hex(16)
+                success, add_message = self.db_manager.add_mount(mount, random_password)
+                if success:
+                    logger.log_info(f"匿名访问模式自动注册挂载点: {mount}")
+                else:
+                    logger.log_warning(f"匿名访问模式自动注册挂载点 {mount} 失败: {add_message}")
              
             try:
                 success, message = connection.get_connection_manager().add_mount_connection(mount, self.client_address[0], getattr(self, 'user_agent', 'Unknown'), getattr(self, 'ntrip_version', '1.0'), self.client_socket)

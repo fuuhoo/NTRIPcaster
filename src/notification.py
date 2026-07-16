@@ -13,7 +13,7 @@ import hmac
 import hashlib
 import base64
 from threading import Thread
-from urllib.parse import quote
+from urllib.parse import quote_plus
 
 from . import config
 from .logger import log_info, log_error, log_warning
@@ -45,23 +45,25 @@ def _dingtalk_sign(secret):
     string_to_sign = f"{timestamp}\n{secret}"
     string_to_sign_enc = string_to_sign.encode('utf-8')
     hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
-    sign = quote(base64.b64encode(hmac_code))
+    sign = quote_plus(base64.b64encode(hmac_code))
     return timestamp, sign
 
 
-def send_dingtalk(webhook_url, title, message):
+def send_dingtalk(webhook_url, title, message, secret=None):
     """发送钉钉群机器人消息
     
     Args:
         webhook_url: 钉钉机器人Webhook地址
         title: 消息标题
         message: 消息内容
+        secret: 加签密钥(可选，钉钉机器人安全设置中设置的密钥)
     """
     url = webhook_url
-    # 如果提供了加签密钥，附加签名参数
-    if 'timestamp=' not in webhook_url and '&sign=' not in webhook_url:
-        # 不支持自动加签，需要用户在Webhook URL中自行拼接
-        pass
+    # 如果提供了加签密钥，自动附加签名参数到URL
+    if secret and secret.strip():
+        timestamp, sign = _dingtalk_sign(secret.strip())
+        separator = '&' if '?' in url else '?'
+        url = f"{url}{separator}timestamp={timestamp}&sign={sign}"
     
     payload = {
         "msgtype": "markdown",
@@ -125,10 +127,10 @@ def send_wecom(webhook_url, title, message):
 def _build_message(event_type, event_data):
     """构建通知消息"""
     event_titles = {
-        'base_station_online': '✅ 基站上线',
-        'base_station_offline': '❌ 基站下线',
-        'mount_online': '✅ 挂载点上线',
-        'mount_offline': '❌ 挂载点下线',
+        'base_station_online': '✅ 挂载点上线',
+        'base_station_offline': '❌ 挂载点下线',
+        'mount_online': '✅ 移动站上线',
+        'mount_offline': '❌ 移动站下线',
     }
     
     title = event_titles.get(event_type, '系统通知')
@@ -139,12 +141,12 @@ def _build_message(event_type, event_data):
     reason = event_data.get('reason', '')
     uptime = event_data.get('uptime', '')
     
-    title = event_titles.get(event_type, '系统通知')
-    
     if event_type.startswith('base_station'):
+        # 挂载点(基站/上传端)上线/下线
+        owner = event_data.get('owner', '未知')
         lines = [
-            f"**基站/挂载点：** {mount_name}",
-            f"**IP 地址：** {ip_address}",
+            f"**挂载点：** {mount_name}",
+            f"**所属用户：** {owner}",
         ]
         if event_type == 'base_station_online':
             lines.append(f"**上线时间：** {connect_time}")
@@ -155,13 +157,15 @@ def _build_message(event_type, event_data):
             if reason:
                 lines.append(f"**下线原因：** {reason}")
     else:
+        # 移动站(用户连接/下载端)上线/下线
+        username = event_data.get('username', '未知')
         lines = [
+            f"**用户：** {username}",
             f"**挂载点：** {mount_name}",
-            f"**用户：** {event_data.get('username', '未知')}",
             f"**IP 地址：** {ip_address}",
         ]
         if event_type == 'mount_online':
-            lines.append(f"**上线时间：** {connect_time}")
+            lines.append(f"**接入时间：** {connect_time}")
         elif event_type == 'mount_offline':
             lines.append(f"**下线时间：** {connect_time}")
             if uptime:
@@ -170,7 +174,6 @@ def _build_message(event_type, event_data):
                 lines.append(f"**下线原因：** {reason}")
     
     return title, "\n".join(lines)
-
 
 def send_notification(bot, event_type, event_data):
     """向单个机器人发送通知
@@ -196,7 +199,8 @@ def send_notification(bot, event_type, event_data):
     title, message = _build_message(event_type, event_data)
     
     if platform == 'dingtalk':
-        return send_dingtalk(webhook_url, title, message)
+        secret = bot.get('secret')
+        return send_dingtalk(webhook_url, title, message, secret)
     elif platform == 'wecom':
         return send_wecom(webhook_url, title, message)
     else:
@@ -204,31 +208,31 @@ def send_notification(bot, event_type, event_data):
         return False
 
 
-def notify_base_station_online(mount_name, ip_address, connect_time=None):
-    """基站（挂载点上传端）上线通知"""
+def notify_base_station_online(mount_name, ip_address, owner=None, connect_time=None):
+    """基站(挂载点上传端)上线通知"""
     notify('base_station_online', {
         'mount_name': mount_name,
         'ip_address': ip_address,
+        'owner': owner or '未知',
         'connect_time': connect_time or time.strftime('%Y-%m-%d %H:%M:%S')
     })
 
-
-def notify_base_station_offline(mount_name, ip_address, connect_time=None, uptime=0, reason=""):
-    """基站（挂载点上传端）下线通知"""
+def notify_base_station_offline(mount_name, ip_address, owner=None, connect_time=None, uptime=0, reason=""):
+    """基站(挂载点上传端)下线通知"""
     notify('base_station_offline', {
         'mount_name': mount_name,
         'ip_address': ip_address,
+        'owner': owner or '未知',
         'connect_time': connect_time or time.strftime('%Y-%m-%d %H:%M:%S'),
         'uptime': uptime,
         'reason': reason
     })
 
-
 _notification_bots_loader = None
 
 
 def _get_notification_bots():
-    """获取启用的机器人配置（延迟加载避免循环导入）"""
+    """获取启用的机器人配置(延迟加载避免循环导入)"""
     global _notification_bots_loader
     if _notification_bots_loader is None:
         # 延迟导入，避免启动时循环依赖
@@ -262,7 +266,7 @@ def notify(event_type, event_data):
 
 
 def notify_mount_online(mount_name, ip_address, username=None, connect_time=None):
-    """挂载点（用户连接/下载端）上线通知"""
+    """挂载点(用户连接/下载端)上线通知"""
     notify('mount_online', {
         'mount_name': mount_name,
         'username': username or '未知',
@@ -272,7 +276,7 @@ def notify_mount_online(mount_name, ip_address, username=None, connect_time=None
 
 
 def notify_mount_offline(mount_name, ip_address, username=None, connect_time=None, uptime=0, reason=""):
-    """挂载点（用户连接/下载端）下线通知"""
+    """挂载点(用户连接/下载端)下线通知"""
     notify('mount_offline', {
         'mount_name': mount_name,
         'username': username or '未知',

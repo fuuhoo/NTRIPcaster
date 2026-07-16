@@ -77,6 +77,7 @@ def init_db():
             name TEXT NOT NULL,
             platform TEXT NOT NULL CHECK(platform IN ('dingtalk', 'wecom')),
             webhook_url TEXT NOT NULL,
+            secret TEXT,
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
@@ -124,6 +125,13 @@ def init_db():
             hashed_password = hash_password(admin_password)
             c.execute("INSERT INTO admins (username, password) VALUES (?, ?)", (admin_username, hashed_password))
             print(f"已创建默认管理员: {admin_username}/{admin_password}（请首次登录后修改）")
+        
+        # 迁移：为旧数据库的notification_bots表添加secret字段
+        c.execute("PRAGMA table_info(notification_bots)")
+        columns = [col[1] for col in c.fetchall()]
+        if 'secret' not in columns:
+            c.execute('ALTER TABLE notification_bots ADD COLUMN secret TEXT')
+            log_info('数据库迁移：为notification_bots表添加secret字段')
         
         conn.commit()
         conn.close()
@@ -267,7 +275,7 @@ def get_all_notification_bots():
         c = conn.cursor()
         try:
             c.execute('''
-                SELECT id, name, platform, webhook_url, enabled, created_at
+                SELECT id, name, platform, webhook_url, secret, enabled, created_at
                 FROM notification_bots
                 ORDER BY id
             ''')
@@ -287,8 +295,9 @@ def get_all_notification_bots():
                     'name': bot[1],
                     'platform': bot[2],
                     'webhook_url': bot[3],
-                    'enabled': bool(bot[4]),
-                    'created_at': bot[5],
+                    'secret': bot[4],
+                    'enabled': bool(bot[5]),
+                    'created_at': bot[6],
                     'events': bot_events.get(bot[0], [])
                 })
             return result
@@ -303,7 +312,7 @@ def get_notification_bots():
         c = conn.cursor()
         try:
             c.execute('''
-                SELECT id, name, platform, webhook_url, enabled
+                SELECT id, name, platform, webhook_url, secret, enabled
                 FROM notification_bots
                 WHERE enabled = 1
                 ORDER BY id
@@ -324,7 +333,8 @@ def get_notification_bots():
                     'name': bot[1],
                     'platform': bot[2],
                     'webhook_url': bot[3],
-                    'enabled': bool(bot[4]),
+                    'secret': bot[4],
+                    'enabled': bool(bot[5]),
                     'events': bot_events.get(bot[0], [])
                 })
             return result
@@ -332,7 +342,7 @@ def get_notification_bots():
             conn.close()
 
 
-def add_notification_bot(name, platform, webhook_url, enabled, events):
+def add_notification_bot(name, platform, webhook_url, secret, enabled, events):
     """添加消息机器人配置
     
     Args:
@@ -361,9 +371,9 @@ def add_notification_bot(name, platform, webhook_url, enabled, events):
                     return False, f"无效的事件类型: {event}"
             
             c.execute('''
-                INSERT INTO notification_bots (name, platform, webhook_url, enabled)
-                VALUES (?, ?, ?, ?)
-            ''', (name, platform, webhook_url, 1 if enabled else 0))
+                INSERT INTO notification_bots (name, platform, webhook_url, secret, enabled)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (name, platform, webhook_url, secret, 1 if enabled else 0))
             bot_id = c.lastrowid
             
             for event in valid_events:
@@ -382,7 +392,7 @@ def add_notification_bot(name, platform, webhook_url, enabled, events):
             conn.close()
 
 
-def update_notification_bot(bot_id, name, platform, webhook_url, enabled, events):
+def update_notification_bot(bot_id, name, platform, webhook_url, secret, enabled, events):
     """更新消息机器人配置"""
     with db_lock:
         conn = sqlite3.connect(config.DATABASE_PATH)
@@ -408,9 +418,9 @@ def update_notification_bot(bot_id, name, platform, webhook_url, enabled, events
             
             c.execute('''
                 UPDATE notification_bots
-                SET name = ?, platform = ?, webhook_url = ?, enabled = ?
+                SET name = ?, platform = ?, webhook_url = ?, secret = ?, enabled = ?
                 WHERE id = ?
-            ''', (name, platform, webhook_url, 1 if enabled else 0, bot_id))
+            ''', (name, platform, webhook_url, secret, 1 if enabled else 0, bot_id))
             
             c.execute('DELETE FROM notification_events WHERE bot_id = ?', (bot_id,))
             
@@ -635,6 +645,26 @@ def get_all_mounts():
             conn.close()
 
 
+
+def get_mount_owner(mount_name):
+    """获取挂载点所属用户"""
+    with db_lock:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        c = conn.cursor()
+        try:
+            c.execute('''
+                SELECT u.username 
+                FROM mounts m 
+                LEFT JOIN users u ON m.user_id = u.id 
+                WHERE m.mount = ?
+            ''', (mount_name,))
+            result = c.fetchone()
+            return result[0] if result and result[0] else '未分配'
+        except Exception:
+            return '未知'
+        finally:
+            conn.close()
+
 def verify_admin(username, password):
     """验证管理员账号密码"""
     with db_lock:
@@ -837,8 +867,8 @@ def get_connection_events(limit=100, offset=0, event_type=None, mount_name=None,
             event_labels = {
                 'base_station_online': '基站上线',
                 'base_station_offline': '基站下线',
-                'mount_online': '挂载点上线',
-                'mount_offline': '挂载点下线'
+                'mount_online': '移动站上线',
+                'mount_offline': '移动站下线'
             }
             for row in rows:
                 result.append({
@@ -889,6 +919,10 @@ class DatabaseManager:
     def init_database(self):
         """初始化数据库"""
         return init_db()
+    
+    def get_mount_owner(self, mount_name):
+        """获取挂载点所属用户"""
+        return get_mount_owner(mount_name)
     
     def verify_mount_and_user(self, mount, username=None, password=None, mount_password=None, protocol_version="1.0"):
         """验证挂载点和用户"""
@@ -1025,13 +1059,13 @@ class DatabaseManager:
         """获取所有启用的消息机器人配置"""
         return get_notification_bots()
     
-    def add_notification_bot(self, name, platform, webhook_url, enabled, events):
+    def add_notification_bot(self, name, platform, webhook_url, secret, enabled, events):
         """添加消息机器人配置"""
-        return add_notification_bot(name, platform, webhook_url, enabled, events)
+        return add_notification_bot(name, platform, webhook_url, secret, enabled, events)
     
-    def update_notification_bot(self, bot_id, name, platform, webhook_url, enabled, events):
+    def update_notification_bot(self, bot_id, name, platform, webhook_url, secret, enabled, events):
         """更新消息机器人配置"""
-        return update_notification_bot(bot_id, name, platform, webhook_url, enabled, events)
+        return update_notification_bot(bot_id, name, platform, webhook_url, secret, enabled, events)
     
     def delete_notification_bot(self, bot_id):
         """删除消息机器人配置"""

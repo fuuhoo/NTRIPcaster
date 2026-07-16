@@ -46,6 +46,19 @@ socket.on('reconnect_failed', function() {
 });
 
 // Update connection status display
+// GGA定位质量码映射表
+const GGA_QUALITY_MAP = {
+    0: { label: '0-无效', color: '#dc3545' },
+    1: { label: '1-单点', color: '#6c757d' },
+    2: { label: '2-DGPS', color: '#17a2b8' },
+    3: { label: '3-PPS', color: '#ffc107' },
+    4: { label: '4-RTK固定', color: '#28a745' },
+    5: { label: '5-RTK浮点', color: '#20c997' },
+    6: { label: '6-估算', color: '#fd7e14' },
+    7: { label: '7-人工', color: '#6f42c1' },
+    8: { label: '8-模拟', color: '#e83e8c' }
+};
+
 function updateConnectionStatus() {
     const statusElement = document.getElementById('connection-status');
     if (statusElement) {
@@ -176,15 +189,23 @@ async function loadPageContent(page) {
                 // Request real-time data
                 requestSystemStats();
                 break;
-            case 'users':
-                // Ensure content panel is displayed on non-dashboard pages
-                contentDiv.parentElement.style.display = 'block';
-                response = await fetch('/api/users');
-                const users = await handleApiResponse(response);
-                // /api/users API already contains correct online status information, use directly
-                contentDiv.innerHTML = getUsersContent(users);
-                loadAnonymousSetting();
-                break;
+        case 'users': {
+            // Ensure content panel is displayed on non-dashboard pages
+            contentDiv.parentElement.style.display = 'block';
+            const params = new URLSearchParams();
+            if (window.mobileStationMountFilter) {
+                params.append('mount_name', window.mobileStationMountFilter);
+            }
+            if (window.mobileStationUsernameFilter) {
+                params.append('username', window.mobileStationUsernameFilter);
+            }
+            const url = '/api/users' + (params.toString() ? '?' + params.toString() : '');
+            response = await fetch(url);
+            const connections = await handleApiResponse(response);
+            contentDiv.innerHTML = getUsersContent(connections);
+            loadAnonymousSetting();
+            break;
+        }
             case 'mounts':
                 // Ensure content panel is displayed on non-dashboard pages
                 contentDiv.parentElement.style.display = 'block';
@@ -1262,7 +1283,7 @@ function getDashboardContent() {
                     <span class="stat-value" id="total-mounts">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">用户连接数：</span>
+                    <span class="stat-label">移动站连接数：</span>
                     <span class="stat-value" id="total-users">-</span>
                 </div>
                 <div class="stat-item">
@@ -1446,51 +1467,54 @@ function getDashboardContent() {
 }
 
 // user
-function getUsersContent(users) {
-    let usersHtml = users.map(user => {
-        //两种方式 API获取和socket推送 可以备用
-        const isOnline = user.online !== undefined ? user.online : (window.onlineUsers && (user.username in window.onlineUsers));
-        const statusHtml = isOnline ? 
-            '<span style="color: #28a745; font-weight: bold;">● 在线</span>' : 
-            '<span style="color: #6c757d;">○ 离线</span>';
+function getUsersContent(connections) {
+    // Extract unique mount names and usernames for filter dropdowns
+    const allMounts = [...new Set((connections || []).map(c => c.mount_name).filter(Boolean))].sort();
+    const allUsernames = [...new Set((connections || []).map(c => c.username).filter(Boolean))].sort();
+    
+    const mountOptions = allMounts.map(m => `<option value="${m}">${m}</option>`).join('');
+    const usernameOptions = allUsernames.map(u => `<option value="${u}">${u}</option>`).join('');
+    const connectionCount = connections ? connections.length : 0;
+    
+    const rowsHtml = (connections || []).map(conn => {
+        const ggaQuality = conn.gga_quality;
+        const ggaInfo = ggaQuality !== null && ggaQuality !== undefined ? 
+            (GGA_QUALITY_MAP[ggaQuality] || { label: ggaQuality + '-未知', color: '#6c757d' }) :
+            { label: '-', color: '#6c757d' };
+        const dataRate = formatDataRate(conn.data_rate || 0);
+        const bytesSent = formatBytes(conn.bytes_sent || 0);
         return `
-            <tr class="user-row" data-username="${user.username}">
-                <td>${user.username}</td>
-                <td class="user-status">${statusHtml}</td>
-                <td>${user.connection_count || 0}</td>
-                <td>${user.connect_time || '-'}</td>
-                <td>
-                    <button class="btn btn-primary btn-sm edit-user-btn" data-username="${user.username}">编辑</button>
-                    <button class="btn btn-danger btn-sm delete-user-btn" data-username="${user.username}">删除</button>
-                </td>
+            <tr data-connection-id="${conn.connection_id}" data-username="${conn.username}">
+                <td>${conn.connection_id}</td>
+                <td>${conn.username}</td>
+                <td>${conn.mount_name}</td>
+                <td>${conn.ip_address}</td>
+                <td>${conn.connect_time}</td>
+                <td>${bytesSent}</td>
+                <td>${dataRate}</td>
+                <td class="diff-status-cell" style="color: ${ggaInfo.color}; font-weight: 600;">${ggaInfo.label}</td>
             </tr>
         `;
     }).join('');
     
-    
     setTimeout(() => {
-        
-        document.querySelectorAll('.edit-user-btn').forEach(btn => {
-            btn.addEventListener('click', function() {
-                const username = this.getAttribute('data-username');
-                editUser(username);
-            });
+        initSearchableDropdown('mount-dropdown', 'mobile-station-mount-filter', 'mobile-station-mount-filter-input', 'mount-dropdown-list', function(value) {
+            window.mobileStationMountFilter = value;
+            loadPageContent('users');
         });
-        
-        
-        document.querySelectorAll('.delete-user-btn').forEach(btn => {
-            btn.addEventListener('click', function() {
-                const username = this.getAttribute('data-username');
-                // console.log('Delete button clicked for user:', username);
-                deleteUser(username);
-            });
+        initSearchableDropdown('username-dropdown', 'mobile-station-username-filter', 'mobile-station-username-filter-input', 'username-dropdown-list', function(value) {
+            window.mobileStationUsernameFilter = value;
+            loadPageContent('users');
         });
     }, 0);
     
     return `
         <div class="page-header">
-            <h3>用户管理</h3>
-            <button onclick="showAddUserForm()" class="btn btn-primary">添加用户</button>
+            <h3>移动站管理</h3>
+            <div style="display: flex; gap: 10px;">
+                <button onclick="showAddUserForm()" class="btn btn-primary">+ 添加用户</button>
+                <button onclick="loadPageContent('users')" class="btn btn-secondary" title="刷新数据">🔄 刷新</button>
+            </div>
         </div>
         <div class="anonymous-access-bar" style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 12px 15px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
             <input type="checkbox" id="anonymous-access" onchange="toggleAnonymousAccess()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
@@ -1499,23 +1523,138 @@ function getUsersContent(users) {
             </label>
             <span id="anonymous-status" style="font-size: 0.85em; color: #6c757d;"></span>
         </div>
+        <div class="filter-bar" style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 14px 18px; margin-bottom: 15px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <label style="margin: 0; font-weight: 600; color: #495057; white-space: nowrap; font-size: 0.9em;">挂载点</label>
+                <div class="searchable-dropdown" style="position: relative;" id="mount-dropdown">
+                    <input type="text" id="mobile-station-mount-filter-input" placeholder="搜索挂载点..." autocomplete="off"
+                        style="min-width: 160px; border-radius: 6px; border: 1px solid #ced4da; padding: 6px 10px; font-size: 0.9em; background: white;"
+                        value="${window.mobileStationMountFilter || ''}">
+                    <div id="mount-dropdown-list" class="dropdown-list" style="display: none; position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ced4da; border-radius: 6px; max-height: 200px; overflow-y: auto; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+                        <div class="dropdown-item" data-value="" style="padding: 8px 12px; cursor: pointer; font-size: 0.9em; border-bottom: 1px solid #f0f0f0;">全部挂载点</div>
+                        ${mountOptions.replace(/<option value="([^"]+)">([^<]+)<\/option>/g, '<div class="dropdown-item" data-value="$1" style="padding: 8px 12px; cursor: pointer; font-size: 0.9em; border-bottom: 1px solid #f0f0f0;">$2</div>')}
+                    </div>
+                    <input type="hidden" id="mobile-station-mount-filter" value="${window.mobileStationMountFilter || ''}">
+                </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <label style="margin: 0; font-weight: 600; color: #495057; white-space: nowrap; font-size: 0.9em;">用户名</label>
+                <div class="searchable-dropdown" style="position: relative;" id="username-dropdown">
+                    <input type="text" id="mobile-station-username-filter-input" placeholder="搜索用户名..." autocomplete="off"
+                        style="min-width: 160px; border-radius: 6px; border: 1px solid #ced4da; padding: 6px 10px; font-size: 0.9em; background: white;"
+                        value="${window.mobileStationUsernameFilter || ''}">
+                    <div id="username-dropdown-list" class="dropdown-list" style="display: none; position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ced4da; border-radius: 6px; max-height: 200px; overflow-y: auto; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+                        <div class="dropdown-item" data-value="" style="padding: 8px 12px; cursor: pointer; font-size: 0.9em; border-bottom: 1px solid #f0f0f0;">全部用户</div>
+                        ${usernameOptions.replace(/<option value="([^"]+)">([^<]+)<\/option>/g, '<div class="dropdown-item" data-value="$1" style="padding: 8px 12px; cursor: pointer; font-size: 0.9em; border-bottom: 1px solid #f0f0f0;">$2</div>')}
+                    </div>
+                    <input type="hidden" id="mobile-station-username-filter" value="${window.mobileStationUsernameFilter || ''}">
+                </div>
+            </div>
+            <span id="mobile-station-filter-status" style="font-size: 0.85em; color: #6c757d; white-space: nowrap; background: rgba(255,255,255,0.7); padding: 4px 10px; border-radius: 4px;">
+                共 ${connectionCount} 个连接
+            </span>
+        </div>
         <div class="table-container">
-            <table class="data-table">
+            <table class="data-table" id="mobile-station-table">
                 <thead>
                     <tr>
+                        <th>连接 ID</th>
                         <th>用户名</th>
-                        <th>状态</th>
-                        <th>连接数</th>
+                        <th>挂载点</th>
+                        <th>IP 地址</th>
                         <th>接入时间</th>
-                        <th>操作</th>
+                        <th>已发送数据</th>
+                        <th>发送速率</th>
+                        <th>差分状态</th>
                     </tr>
                 </thead>
                 <tbody>
-                    ${usersHtml}
+                    ${rowsHtml || '<tr><td colspan="8" style="text-align: center; color: #6c757d; padding: 2rem;">暂无移动站连接</td></tr>'}
                 </tbody>
             </table>
         </div>
     `;
+}
+
+// 加载用户连接详情
+async function loadUserConnections(username, container) {
+    container.innerHTML = '<p class="loading-text" style="margin: 0;">正在加载连接详情...</p>';
+    
+    try {
+        const mountFilter = window.userMountFilter || '';
+        const url = mountFilter 
+            ? `/api/users/${encodeURIComponent(username)}/connections?mount_name=${encodeURIComponent(mountFilter)}`
+            : `/api/users/${encodeURIComponent(username)}/connections`;
+        
+        const response = await fetch(url);
+        const result = await handleApiResponse(response);
+        
+        if (!result.success || !result.connections) {
+            container.innerHTML = '<p class="empty-text" style="margin: 0; color: #6c757d;">暂无连接详情</p>';
+            return;
+        }
+        
+        const connections = result.connections;
+        if (connections.length === 0) {
+            container.innerHTML = '<p class="empty-text" style="margin: 0; color: #6c757d;">暂无连接</p>';
+            return;
+        }
+        
+        const diffingCount = connections.filter(c => c.is_diffing).length;
+        const summaryHtml = `<div style="margin-bottom: 10px; font-size: 0.9em; color: #6c757d;">
+            共 ${connections.length} 个连接，<span style="color: #28a745;">${diffingCount} 个差分中</span>
+        </div>`;
+        
+        const rows = connections.map(conn => {
+            const ggaQuality = conn.gga_quality;
+            const ggaInfo = ggaQuality !== null && ggaQuality !== undefined ? 
+                (GGA_QUALITY_MAP[ggaQuality] || { label: ggaQuality + '-未知', color: '#6c757d' }) :
+                { label: '-', color: '#6c757d' };
+            const dataRate = formatDataRate(conn.data_rate || 0);
+            const bytesSent = formatBytes(conn.bytes_sent || 0);
+            return `
+                <tr>
+                    <td>${conn.mount_name || '-'}</td>
+                    <td>${conn.ip_address || '-'}</td>
+                    <td>${conn.connect_time || '-'}</td>
+                    <td>${bytesSent}</td>
+                    <td>${dataRate}</td>
+                    <td style="color: ${ggaInfo.color}; font-weight: 600;">${ggaInfo.label}</td>
+                </tr>
+            `;
+        }).join('');
+        
+        container.innerHTML = `
+            ${summaryHtml}
+            <div class="table-container" style="max-height: 300px; overflow-y: auto;">
+                <table class="data-table" style="min-width: 600px; background: white;">
+                    <thead>
+                        <tr>
+                            <th>挂载点</th>
+                            <th>IP 地址</th>
+                            <th>接入时间</th>
+                            <th>已发送数据</th>
+                            <th>发送速率</th>
+                            <th>差分状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    } catch (error) {
+        container.innerHTML = `<p class="empty-text" style="margin: 0; color: #dc3545;">加载失败：${error.message}</p>`;
+    }
+}
+
+// 格式化数据速率
+function formatDataRate(bytesPerSecond) {
+    if (bytesPerSecond <= 0) return '0 B/s';
+    if (bytesPerSecond < 1024) return `${bytesPerSecond.toFixed(1)} B/s`;
+    if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(2)} KB/s`;
+    return `${(bytesPerSecond / (1024 * 1024)).toFixed(2)} MB/s`;
 }
 
 // 挂载点管理内容
@@ -1526,16 +1665,22 @@ function getMountsContent(mounts) {
         const statusHtml = isOnline ? 
             '<span style="color: #28a745; font-weight: bold;">● 在线</span>' : 
             '<span style="color: #6c757d;">○ 离线</span>';
+        const isAnonymous = mount.anonymous === true || mount.id === -1;
+        const actionButtons = isAnonymous ?
+            '<span style="color: #6c757d; font-size: 0.85em;">匿名</span>' :
+            `
+                <button onclick="editMount('${mount.mount}')" class="btn btn-primary btn-sm">编辑</button>
+                <button onclick="deleteMount('${mount.mount}')" class="btn btn-danger btn-sm">删除</button>
+            `;
         return `
             <tr class="mount-row" data-mount="${mount.mount}">
                 <td>${mount.mount}</td>
                 <td class="mount-status">${statusHtml}</td>
                 <td>${mount.connections || 0}</td>
-                <td>${mount.username || '未指定'}</td>
-                <td>${mount.description || '-'}</td>
+                <td>${isAnonymous ? '匿名' : (mount.username || '未指定')}</td>
+                <td>${isAnonymous ? '系统自动注册' : (mount.description || '-')}</td>
                 <td>
-                    <button onclick="editMount('${mount.mount}')" class="btn btn-primary btn-sm">编辑</button>
-                    <button onclick="deleteMount('${mount.mount}')" class="btn btn-danger btn-sm">删除</button>
+                    ${actionButtons}
                 </td>
             </tr>
         `;
@@ -1554,7 +1699,7 @@ function getMountsContent(mounts) {
             <span id="anonymous-status" style="font-size: 0.85em; color: #6c757d;"></span>
         </div>
         <div class="table-container">
-            <table class="data-table">
+            <table class="data-table" id="mobile-station-table">
                 <thead>
                     <tr>
                         <th>挂载点</th>
@@ -1661,7 +1806,7 @@ function getConnectionEventsContent() {
     return `
         <div class="page-header">
             <h3>连接事件日志</h3>
-            <p class="page-subtitle">基站（上传端）和挂载点（用户连接/下载端）的上下线记录</p>
+            <p class="page-subtitle">基站（上传端）和移动站（用户连接/下载端）的上下线记录</p>
         </div>
         <div class="settings-container" style="max-width: 100%; margin: 0 auto;">
             <div class="settings-section">
@@ -1670,8 +1815,8 @@ function getConnectionEventsContent() {
                         <option value="">全部事件</option>
                         <option value="base_station_online">基站上线</option>
                         <option value="base_station_offline">基站下线</option>
-                        <option value="mount_online">挂载点上线</option>
-                        <option value="mount_offline">挂载点下线</option>
+                        <option value="mount_online">移动站上线</option>
+                        <option value="mount_offline">移动站下线</option>
                     </select>
                     <input type="text" id="connection-event-mount" placeholder="挂载点名称" class="form-control" style="width: auto; min-width: 120px;">
                     <input type="text" id="connection-event-user" placeholder="用户名" class="form-control" style="width: auto; min-width: 120px;">
@@ -1709,7 +1854,7 @@ function getSettingsContent() {
 
             <div class="settings-section">
                 <h4>消息机器人通知</h4>
-                <p class="section-desc">当基站（挂载点上传端）或挂载点（用户连接/下载端）上线或下线时，向钉钉或企业微信群机器人发送消息提醒。</p>
+                <p class="section-desc">当基站（挂载点上传端）或移动站（用户连接/下载端）上线或下线时，向钉钉或企业微信群机器人发送消息提醒。</p>
                 <div id="notification-bots-list">
                     <p class="loading-text">正在加载机器人配置...</p>
                 </div>
@@ -2110,7 +2255,7 @@ function updateSystemStats(stats) {
     }
     
     if (stats.users) {
-        updateElement('total-users', Object.keys(stats.users).length);
+        updateElement('total-users', stats.users.length);
     }
     
     if (stats.data_transfer) {
@@ -2207,24 +2352,41 @@ function formatUptime(seconds) {
 
 // 
 function updateOnlineStatus() {
-    
+    // 移动站页面：检测连接变化，自动刷新列表
     if (currentPage === 'users') {
-        const userRows = document.querySelectorAll('.user-row');
-        userRows.forEach(row => {
-            const username = row.dataset.username;
-            const statusElement = row.querySelector('.user-status');
-            if (statusElement) {
-                if (window.onlineUsers) {
-                    const isOnline = username in window.onlineUsers;
-                    statusElement.innerHTML = isOnline ? 
-                        '<span style="color: #28a745; font-weight: bold;">● 在线</span>' : 
-                        '<span style="color: #6c757d;">○ 离线</span>';
-                }
-            }
+        // 获取当前表格中的连接ID集合
+        const tableRows = document.querySelectorAll('#mobile-station-table tbody tr[data-connection-id]');
+        const currentConnectionIds = new Set();
+        tableRows.forEach(row => {
+            currentConnectionIds.add(row.dataset.connectionId);
         });
+        
+        // 获取socket推送的连接ID集合
+        const socketConnectionIds = new Set();
+        if (window.onlineUsers) {
+            Object.values(window.onlineUsers).forEach(conns => {
+                conns.forEach(conn => {
+                    if (conn.connection_id) {
+                        socketConnectionIds.add(conn.connection_id);
+                    }
+                });
+            });
+        }
+        
+        // 比较连接ID集合：数量不同或具体ID不同都需要刷新
+        const needsRefresh = currentConnectionIds.size !== socketConnectionIds.size || 
+            [...currentConnectionIds].some(id => !socketConnectionIds.has(id)) ||
+            [...socketConnectionIds].some(id => !currentConnectionIds.has(id));
+        
+        if (needsRefresh) {
+            // 连接有新增或删除，刷新整个列表
+            loadPageContent('users');
+        } else {
+            // 连接没有变化，只更新差分状态和数据速率
+            updateMobileStationDiffingStatus();
+        }
     }
     
-
     if (currentPage === 'mounts') {
         const mountRows = document.querySelectorAll('.mount-row');
         mountRows.forEach(row => {
@@ -2247,11 +2409,11 @@ function updateOnlineStatus() {
 
 //
 function updateDashboardCounts() {
-    // users
-    const onlineUsersCount = window.onlineUsers ? Object.keys(window.onlineUsers).length : 0;
-    const dashboardOnlineUsersElement = document.getElementById('dashboard-online-users');
-    if (dashboardOnlineUsersElement) {
-        dashboardOnlineUsersElement.textContent = onlineUsersCount;
+    // 移动站连接数（从在线用户连接统计）
+    const mobileStationCount = window.onlineUsers ? Object.values(window.onlineUsers).reduce((sum, conns) => sum + (conns ? conns.length : 0), 0) : 0;
+    const totalUsersElement = document.getElementById('total-users');
+    if (totalUsersElement) {
+        totalUsersElement.textContent = mobileStationCount;
     }
     
     // mounts
@@ -2380,6 +2542,150 @@ function validateAlphanumeric(input, fieldName) {
 }
 
 // Add log line
+// 局部刷新移动站差分状态（不刷新整个列表）
+function updateMobileStationDiffingStatus() {
+    if (!window.onlineUsers) return;
+    
+    const rows = document.querySelectorAll('#mobile-station-table tbody tr[data-connection-id]');
+    rows.forEach(row => {
+        const connectionId = row.dataset.connectionId;
+        const username = row.dataset.username;
+        if (!connectionId || !username) return;
+        
+        // 从 onlineUsers 中查找连接状态
+        const userConns = window.onlineUsers[username];
+        if (!userConns) return;
+        
+        const conn = userConns.find(c => c.connection_id === connectionId);
+        if (!conn) return;
+        
+        // 更新差分状态（GGA质量码）
+        const diffCell = row.querySelector('.diff-status-cell');
+        if (diffCell) {
+            const ggaQuality = conn.gga_quality;
+            const ggaInfo = ggaQuality !== null && ggaQuality !== undefined ? 
+                (GGA_QUALITY_MAP[ggaQuality] || { label: ggaQuality + '-未知', color: '#6c757d' }) :
+                { label: '-', color: '#6c757d' };
+            diffCell.textContent = ggaInfo.label;
+            diffCell.style.color = ggaInfo.color;
+        }
+        
+        // 实时更新已发送数据量
+        const bytesSentCell = row.cells[5];
+        if (bytesSentCell && conn.bytes_sent !== undefined) {
+            bytesSentCell.textContent = formatBytes(conn.bytes_sent);
+        }
+        
+        // 实时更新发送速率
+        const dataRateCell = row.cells[6];
+        if (dataRateCell && conn.data_rate !== undefined) {
+            dataRateCell.textContent = formatDataRate(conn.data_rate);
+        }
+    });
+}
+
+// 初始化可搜索下拉框
+function initSearchableDropdown(containerId, hiddenInputId, inputId, listId, onSelect) {
+    const container = document.getElementById(containerId);
+    const input = document.getElementById(inputId);
+    const list = document.getElementById(listId);
+    const hiddenInput = document.getElementById(hiddenInputId);
+    
+    if (!container || !input || !list || !hiddenInput) return;
+    
+    // Show dropdown on focus
+    input.addEventListener('focus', function() {
+        list.style.display = 'block';
+        filterDropdownItems(input.value, list);
+    });
+    
+    // Filter items on input
+    input.addEventListener('input', function() {
+        filterDropdownItems(this.value, list);
+        list.style.display = 'block';
+    });
+    
+    // Handle item click
+    list.addEventListener('click', function(e) {
+        const item = e.target.closest('.dropdown-item');
+        if (item) {
+            const value = item.getAttribute('data-value');
+            const text = item.textContent;
+            input.value = text === '全部挂载点' || text === '全部用户' ? '' : text;
+            hiddenInput.value = value;
+            list.style.display = 'none';
+            if (onSelect) onSelect(value);
+        }
+    });
+    
+    // Close dropdown when clicking outside
+    document.addEventListener('click', function(e) {
+        if (!container.contains(e.target)) {
+            list.style.display = 'none';
+        }
+    });
+    
+    // Handle keyboard navigation
+    input.addEventListener('keydown', function(e) {
+        const items = list.querySelectorAll('.dropdown-item:not([style*="display: none"])');
+        let activeIndex = Array.from(items).findIndex(item => item.classList.contains('active'));
+        
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            list.style.display = 'block';
+            if (activeIndex < items.length - 1) activeIndex++;
+            else activeIndex = 0;
+            setActiveItem(items, activeIndex);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (activeIndex > 0) activeIndex--;
+            else activeIndex = items.length - 1;
+            setActiveItem(items, activeIndex);
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            const activeItem = list.querySelector('.dropdown-item.active');
+            if (activeItem) {
+                activeItem.click();
+            }
+        } else if (e.key === 'Escape') {
+            list.style.display = 'none';
+        }
+    });
+}
+
+function filterDropdownItems(searchText, list) {
+    const items = list.querySelectorAll('.dropdown-item');
+    const lowerSearch = searchText.toLowerCase();
+    items.forEach(item => {
+        const text = item.textContent.toLowerCase();
+        if (text.includes(lowerSearch)) {
+            item.style.display = '';
+        } else {
+            item.style.display = 'none';
+        }
+    });
+}
+
+function setActiveItem(items, index) {
+    items.forEach(item => item.classList.remove('active'));
+    if (items[index]) {
+        items[index].classList.add('active');
+        items[index].style.background = '#e9ecef';
+    }
+    items.forEach((item, i) => {
+        if (i !== index) item.style.background = '';
+    });
+}
+
+// Debounce utility function
+function debounce(func, wait) {
+    let timeout;
+    return function(...args) {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(this, args), wait);
+    };
+}
+
 // Debounced scroll function
 let scrollTimeout = null;
 function debouncedScroll(container) {
@@ -2474,7 +2780,7 @@ function showAddUserForm() {
     document.body.insertAdjacentHTML('beforeend', formHtml);
 }
 
-function submitAddUser() {
+async function submitAddUser() {
     const username = document.getElementById('newUsername').value.trim();
     const password = document.getElementById('newPassword').value;
     
@@ -2502,7 +2808,7 @@ function submitAddUser() {
         return;
     }
     
-    addUser(username, password);
+    await addUser(username, password);
     closeModal('userModal');
 }
 
@@ -2665,7 +2971,9 @@ async function showAddMountForm() {
         if (response.ok) {
             const users = await response.json();
             users.forEach(user => {
-                usersOptions += `<option value="${user.id}">${user.username}</option>`;
+                if (!user.anonymous && user.id !== -1) {
+                    usersOptions += `<option value="${user.id}">${user.username}</option>`;
+                }
             });
         }
     } catch (error) {
@@ -2770,11 +3078,11 @@ async function editMount(mount) {
         }
         
         // If mount point is bound to a user, get username
-        if (currentMountData && currentMountData.user_id) {
+        if (currentMountData && currentMountData.user_id && currentMountData.user_id !== -1) {
             const usersResponse = await fetch('/api/users');
             if (usersResponse.ok) {
                 const users = await usersResponse.json();
-                const currentUser = users.find(u => u.id === currentMountData.user_id);
+                const currentUser = users.find(u => u.id === currentMountData.user_id && !u.anonymous);
                 if (currentUser) {
                     currentUsername = currentUser.username;
                 }
@@ -3203,8 +3511,8 @@ function renderNotificationBots(bots) {
     const eventLabels = {
         'base_station_online': '基站上线',
         'base_station_offline': '基站下线',
-        'mount_online': '挂载点上线',
-        'mount_offline': '挂载点下线'
+        'mount_online': '移动站上线',
+        'mount_offline': '移动站下线'
     };
 
     const platformLabels = {
@@ -3251,6 +3559,7 @@ function showNotificationBotModal(bot = null) {
     const name = bot ? bot.name : '';
     const platform = bot ? bot.platform : 'dingtalk';
     const webhookUrl = bot ? bot.webhook_url : '';
+    const secret = bot ? (bot.secret || '') : '';
     const enabled = bot ? bot.enabled : true;
     const events = bot ? (bot.events || []) : [];
 
@@ -3273,6 +3582,11 @@ function showNotificationBotModal(bot = null) {
                     <label>Webhook 地址</label>
                     <input type="text" id="botWebhookUrl" value="${escapeHtml(webhookUrl)}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=xxx">
                 </div>
+                <div class="form-group" id="secretFieldGroup">
+                    <label>加签密钥（可选）</label>
+                    <input type="text" id="botSecret" value="${escapeHtml(secret)}" placeholder="SECxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
+                    <small style="color: #6c757d; font-size: 0.8em;">钉钉机器人安全设置中开启「加签」后，复制此处密钥</small>
+                </div>
                 <div class="form-group">
                     <label>消息类型</label>
                     <div style="display: flex; gap: 15px; flex-wrap: wrap;">
@@ -3286,11 +3600,11 @@ function showNotificationBotModal(bot = null) {
                         </label>
                         <label style="display: flex; align-items: center; gap: 5px; font-weight: normal; cursor: pointer;">
                             <input type="checkbox" id="eventMountOnline" value="mount_online" ${events.includes('mount_online') ? 'checked' : ''}>
-                            挂载点上线
+                            移动站上线
                         </label>
                         <label style="display: flex; align-items: center; gap: 5px; font-weight: normal; cursor: pointer;">
                             <input type="checkbox" id="eventMountOffline" value="mount_offline" ${events.includes('mount_offline') ? 'checked' : ''}>
-                            挂载点下线
+                            移动站下线
                         </label>
                     </div>
                 </div>
@@ -3314,6 +3628,7 @@ async function submitNotificationBot(botId) {
     const name = document.getElementById('botName').value.trim();
     const platform = document.getElementById('botPlatform').value;
     const webhookUrl = document.getElementById('botWebhookUrl').value.trim();
+    const secret = document.getElementById('botSecret').value.trim();
     const enabled = document.getElementById('botEnabled').checked;
     const events = [];
     if (document.getElementById('eventBaseStationOnline').checked) events.push('base_station_online');
@@ -3334,7 +3649,7 @@ async function submitNotificationBot(botId) {
         return;
     }
 
-    const payload = { name, platform, webhook_url: webhookUrl, enabled, events };
+    const payload = { name, platform, webhook_url: webhookUrl, secret, enabled, events };
     const url = botId ? `/api/notification/bots/${botId}` : '/api/notification/bots';
     const method = botId ? 'PUT' : 'POST';
 
@@ -3478,8 +3793,8 @@ function renderConnectionEvents(events, statistics, pagination = null) {
     const eventLabels = {
         'base_station_online': '基站上线',
         'base_station_offline': '基站下线',
-        'mount_online': '挂载点上线',
-        'mount_offline': '挂载点下线'
+        'mount_online': '移动站上线',
+        'mount_offline': '移动站下线'
     };
 
     const statItems = Object.entries(statistics).map(([type, count]) => {

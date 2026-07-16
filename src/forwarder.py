@@ -4,6 +4,7 @@
 import time
 import socket
 import threading
+import re
 from collections import deque
 from threading import Lock, RLock
 from . import config
@@ -187,7 +188,9 @@ class SimpleDataForwarder:
                 'last_sent_timestamp': current_time,  
                 'bytes_sent': 0,
                 'messages_sent': 0,
-                'send_errors': 0
+                'send_errors': 0,
+                'gga_quality': None,
+                'gga_last_update': None
             }
             
             with self.client_lock:
@@ -207,6 +210,10 @@ class SimpleDataForwarder:
                 self.stats['active_clients'] = sum(len(clients) for clients in self.clients.values())
             
             logger.log_client_connect(user, mount, addr[0], protocol_version)
+            
+            # Start GGA reader thread for this client
+            self._start_gga_reader(client_info)
+            
             return client_info
             
         except Exception as e:
@@ -217,6 +224,99 @@ class SimpleDataForwarder:
                 pass
             raise
     
+    def _start_gga_reader(self, client_info):
+        """启动GGA读取线程，非阻塞读取移动站发送的NMEA GGA数据"""
+        def gga_reader():
+            socket_obj = client_info.get('socket')
+            if not socket_obj:
+                return
+            
+            # Set non-blocking mode with timeout for reading
+            try:
+                socket_obj.setblocking(False)
+            except (OSError, ValueError):
+                return
+            
+            buffer = b''
+            while True:
+                try:
+                    # Non-blocking read with small chunk
+                    data = socket_obj.recv(1024)
+                    if not data:
+                        break
+                    buffer += data
+                    
+                    # Process buffer for GGA messages
+                    while b'\r\n' in buffer or b'\n' in buffer:
+                        # Find line break
+                        idx_crlf = buffer.find(b'\r\n')
+                        idx_lf = buffer.find(b'\n')
+                        
+                        if idx_crlf != -1 and (idx_lf == -1 or idx_crlf < idx_lf):
+                            line = buffer[:idx_crlf].decode('utf-8', errors='ignore')
+                            buffer = buffer[idx_crlf + 2:]
+                        elif idx_lf != -1:
+                            line = buffer[:idx_lf].decode('utf-8', errors='ignore')
+                            buffer = buffer[idx_lf + 1:]
+                        else:
+                            break
+                        
+                        # Parse GGA message
+                        quality = self._parse_gga_quality(line)
+                        if quality is not None:
+                            client_info['gga_quality'] = quality
+                            client_info['gga_last_update'] = time.time()
+                            # Update connection manager
+                            if client_info.get('connection_id') and client_info.get('user'):
+                                connection.update_gga_quality(
+                                    client_info['user'],
+                                    client_info['connection_id'],
+                                    quality
+                                )
+                
+                except BlockingIOError:
+                    # No data available, sleep briefly
+                    time.sleep(0.5)
+                except (OSError, ConnectionResetError, BrokenPipeError):
+                    break
+                except Exception:
+                    break
+        
+        # Start GGA reader thread
+        reader_thread = threading.Thread(target=gga_reader, daemon=True)
+        reader_thread.start()
+    
+    def _parse_gga_quality(self, line):
+        """解析NMEA GGA消息，返回定位质量码
+        
+        GGA格式: $GNGGA,time,lat,N,lon,E,quality,sats,hdop,alt,M,geoid,M,age,ref*cs\r\n
+        quality: 0=无效, 1=GPS单点, 2=DGPS, 4=RTK固定, 5=RTK浮点, 6=估算
+        """
+        if not line or not line.startswith('$G') or 'GGA' not in line:
+            return None
+        
+        try:
+            parts = line.split(',')
+            if len(parts) < 7:
+                return None
+            
+            # Check if it's a valid GGA message
+            msg_type = parts[0]
+            if not (msg_type.endswith('GGA') and msg_type.startswith('$G')):
+                return None
+            
+            quality_str = parts[6]
+            if quality_str == '' or quality_str is None:
+                return None
+            
+            quality = int(quality_str)
+            # Valid quality codes: 0-8
+            if 0 <= quality <= 8:
+                return quality
+            return None
+        except (ValueError, IndexError):
+            return None
+
     def _enable_keepalive(self, client_socket):
         """TCP Keep-Alive"""
         try:

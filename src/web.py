@@ -333,6 +333,7 @@ class WebManager:
                 name = data.get('name', '').strip()
                 platform = data.get('platform', '').strip().lower()
                 webhook_url = data.get('webhook_url', '').strip()
+                secret = data.get('secret', '').strip()
                 enabled = bool(data.get('enabled', True))
                 events = data.get('events', [])
                 
@@ -345,7 +346,7 @@ class WebManager:
                 if not events or not isinstance(events, list):
                     return jsonify({'success': False, 'error': '请至少选择一个消息类型'}), 400
                 
-                success, message = self.db_manager.add_notification_bot(name, platform, webhook_url, enabled, events)
+                success, message = self.db_manager.add_notification_bot(name, platform, webhook_url, secret, enabled, events)
                 if success:
                     log_system_event(f"消息机器人配置已添加: {name} ({platform})")
                     return jsonify({'success': True, 'message': message}), 201
@@ -368,6 +369,7 @@ class WebManager:
                     name = data.get('name', '').strip()
                     platform = data.get('platform', '').strip().lower()
                     webhook_url = data.get('webhook_url', '').strip()
+                    secret = data.get('secret', '').strip()
                     enabled = bool(data.get('enabled', True))
                     events = data.get('events', [])
                     
@@ -380,7 +382,7 @@ class WebManager:
                     if not events or not isinstance(events, list):
                         return jsonify({'success': False, 'error': '请至少选择一个消息类型'}), 400
                     
-                    success, message = self.db_manager.update_notification_bot(bot_id, name, platform, webhook_url, enabled, events)
+                    success, message = self.db_manager.update_notification_bot(bot_id, name, platform, webhook_url, secret, enabled, events)
                     if success:
                         log_system_event(f"消息机器人配置已更新: {name} (ID: {bot_id})")
                         return jsonify({'success': True, 'message': message})
@@ -713,38 +715,45 @@ class WebManager:
         @self.app.route('/api/users', methods=['GET', 'POST'])
         @self.require_login
         def api_users():
-            """用户管理API"""
+            """用户管理API（GET 已改为移动站连接列表）"""
             if request.method == 'GET':
-                # 获取用户列表
+                # 获取移动站连接列表，支持按挂载点和用户名模糊筛选
                 try:
-                    users = self.db_manager.get_all_users()
+                    mount_filter = request.args.get('mount_name', '').strip()
+                    username_filter = request.args.get('username', '').strip()
                     
-                    # 获取在线用户信息
-                    try:
-                        online_users = connection.get_connection_manager().get_online_users()
-                        online_usernames = list(online_users.keys())
-                    except Exception as e:
-                        log_error(f"获取在线用户失败: {e}")
-                        online_usernames = []
+                    # 获取所有连接，然后在后端进行模糊筛选
+                    connections = connection.get_connection_manager().get_all_user_connections()
                     
-                    # 将tuple转换为字典格式并添加在线状态和连接数
-                    user_list = []
-                    for user in users:
-                        username = user[1]
-                        connection_count = connection.get_connection_manager().get_user_connection_count(username)
-                        connect_time = connection.get_connection_manager().get_user_connect_time(username)
-                        user_dict = {
-                            'id': user[0],
+                    # 模糊筛选挂载点
+                    if mount_filter:
+                        connections = [c for c in connections if mount_filter.lower() in c.get('mount_name', '').lower()]
+                    
+                    # 模糊筛选用户名
+                    if username_filter:
+                        connections = [c for c in connections if username_filter.lower() in c.get('username', '').lower()]
+                    
+                    # 为每个连接补充差分状态和数据速率
+                    result = []
+                    for conn in connections:
+                        connection_id = conn.get('connection_id', '')
+                        username = conn.get('username', '')
+                        is_diffing = connection.get_connection_manager().is_user_connection_diffing(username, connection_id)
+                        data_rate = connection.get_connection_manager().get_user_connection_data_rate(username, connection_id)
+                        result.append({
+                            'connection_id': connection_id,
                             'username': username,
-                            'online': username in online_usernames,
-                            'connection_count': connection_count,
-                            'connect_time': connect_time or '-'  # 接入时间
-                        }
-                        user_list.append(user_dict)
+                            'mount_name': conn.get('mount_name', ''),
+                            'ip_address': conn.get('ip_address', ''),
+                            'connect_time': conn.get('connect_datetime', '-'),
+                            'bytes_sent': conn.get('bytes_sent', 0),
+                            'data_rate': data_rate,
+                            'is_diffing': is_diffing
+                        })
                     
-                    return jsonify(user_list)
+                    return jsonify(result)
                 except Exception as e:
-                    log_error(f"获取用户列表失败: {e}")
+                    log_error(f"获取移动站连接列表失败: {e}")
                     return jsonify({'error': str(e)}), 500
             
             elif request.method == 'POST':
@@ -790,6 +799,44 @@ class WebManager:
                 except Exception as e:
                     log_error(f"添加用户失败: {e}")
                     return jsonify({'error': str(e)}), 500
+        
+        @self.app.route('/api/users/<username>/connections', methods=['GET'])
+        @self.require_login
+        def api_user_connections(username):
+            """获取用户连接详情API"""
+            try:
+                mount_name = request.args.get('mount_name', '').strip()
+                connections = connection.get_connection_manager().get_user_connections(username)
+                
+                result = []
+                for conn in connections:
+                    if mount_name and conn.get('mount_name') != mount_name:
+                        continue
+                    
+                    connection_id = conn.get('connection_id', '')
+                    is_diffing = connection.get_connection_manager().is_user_connection_diffing(username, connection_id)
+                    data_rate = connection.get_connection_manager().get_user_connection_data_rate(username, connection_id)
+                    
+                    gga_quality = connection.get_connection_manager().get_user_connection_gga_quality(username, connection_id)
+                    result.append({
+                        'connection_id': connection_id,
+                        'mount_name': conn.get('mount_name', ''),
+                        'ip_address': conn.get('ip_address', ''),
+                        'connect_time': conn.get('connect_datetime', '-'),
+                        'bytes_sent': conn.get('bytes_sent', 0),
+                        'data_rate': data_rate,
+                        'is_diffing': is_diffing,
+                        'gga_quality': gga_quality
+                    })
+                
+                return jsonify({
+                    'success': True,
+                    'username': username,
+                    'connections': result
+                })
+            except Exception as e:
+                log_error(f"获取用户 {username} 连接详情失败: {e}")
+                return jsonify({'error': str(e)}), 500
         
         @self.app.route('/api/users/<username>', methods=['PUT', 'DELETE'])
         @self.require_login
@@ -914,15 +961,17 @@ class WebManager:
                     
                     # 将tuple转换为字典格式并添加运行状态和连接信息
                     mount_list = []
+                    db_mount_names = set()
                     for mount in mounts:
                         mount_name = mount[1]
+                        db_mount_names.add(mount_name)
                         is_online = mount_name in online_mounts
                         # 获取实际的数据率
                         data_rate_str = '0 B/s'
                         if is_online:
                             mount_info = connection.get_connection_manager().get_mount_info(mount_name)
-                            if mount_info and 'data_rate' in mount_info:
-                                data_rate_bps = mount_info['data_rate']
+                            if mount_info:
+                                data_rate_bps = mount_info.get('data_rate', 0) or 0
                                 if data_rate_bps >= 1024:
                                     data_rate_str = f'{data_rate_bps/1024:.2f} KB/s'
                                 else:
@@ -937,9 +986,43 @@ class WebManager:
                             'lon': mount[6] if len(mount) > 6 and mount[6] is not None else 0,
                             'active': is_online,
                             'connections': connection.get_connection_manager().get_mount_connection_count(mount_name) if is_online else 0,
-                            'data_rate': data_rate_str
+                            'data_rate': data_rate_str,
+                            'anonymous': config.ALLOW_ANONYMOUS and mount[3] is None  # 匿名访问模式下未绑定用户的挂载点标记为匿名
                         }
                         mount_list.append(mount_dict)
+                    
+                    # 补充匿名访问上线的挂载点（数据库中不存在）
+                    for mount_name, mount_info in online_mounts.items():
+                        if mount_name not in db_mount_names:
+                            # mount_info 是 MountInfo 对象，需要转换为字典或直接使用属性
+                            if isinstance(mount_info, dict):
+                                data_rate_bps = mount_info.get('data_rate', 0) or 0
+                                user_agent = mount_info.get('user_agent') or 'anonymous'
+                                lat = mount_info.get('lat')
+                                lon = mount_info.get('lon')
+                            else:
+                                data_rate_bps = getattr(mount_info, 'data_rate', 0) or 0
+                                user_agent = getattr(mount_info, 'user_agent', '') or 'anonymous'
+                                lat = getattr(mount_info, 'lat', None)
+                                lon = getattr(mount_info, 'lon', None)
+                            
+                            if data_rate_bps >= 1024:
+                                data_rate_str = f'{data_rate_bps/1024:.2f} KB/s'
+                            else:
+                                data_rate_str = f'{data_rate_bps:.2f} B/s'
+                            
+                            mount_list.append({
+                                'id': -1,
+                                'mount': mount_name,
+                                'password': '',
+                                'username': user_agent,
+                                'lat': lat if lat is not None else 0,
+                                'lon': lon if lon is not None else 0,
+                                'active': True,
+                                'connections': connection.get_connection_manager().get_mount_connection_count(mount_name),
+                                'data_rate': data_rate_str,
+                                'anonymous': True  # 标记为匿名挂载点，便于前端区分
+                            })
                     
                     return jsonify(mount_list)
                 except Exception as e:
