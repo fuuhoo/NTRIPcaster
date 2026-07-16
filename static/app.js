@@ -1676,7 +1676,7 @@ function getMountsContent(mounts) {
             <tr class="mount-row" data-mount="${mount.mount}">
                 <td>${mount.mount}</td>
                 <td class="mount-status">${statusHtml}</td>
-                <td>${mount.connections || 0}</td>
+                <td class="mount-connections">${mount.connections || 0}</td>
                 <td>${isAnonymous ? '匿名' : (mount.username || '未指定')}</td>
                 <td>${isAnonymous ? '系统自动注册' : (mount.description || '-')}</td>
                 <td>
@@ -2387,21 +2387,54 @@ function updateOnlineStatus() {
         }
     }
     
+    // 挂载点页面：检测挂载点上下线变化，自动刷新列表
     if (currentPage === 'mounts') {
+        // 获取当前表格中的挂载点名称集合
         const mountRows = document.querySelectorAll('.mount-row');
+        const currentMountNames = new Set();
         mountRows.forEach(row => {
-            const mountName = row.dataset.mount;
-            const statusElement = row.querySelector('.mount-status');
-            if (statusElement) {
+            currentMountNames.add(row.dataset.mount);
+        });
+        
+        // 获取socket推送的在线挂载点名称集合
+        const socketMountNames = new Set();
+        if (window.onlineMounts) {
+            Object.keys(window.onlineMounts).forEach(mountName => {
+                socketMountNames.add(mountName);
+            });
+        }
+        
+        // 检测挂载点是否有新增或删除（上下线）
+        const mountsAdded = [...socketMountNames].some(name => !currentMountNames.has(name));
+        const mountsRemoved = [...currentMountNames].some(name => !socketMountNames.has(name));
+        
+        if (mountsAdded || mountsRemoved) {
+            // 挂载点有新增或删除，刷新整个列表
+            loadPageContent('mounts');
+        } else {
+            // 挂载点没有变化，只更新在线状态和连接数
+            mountRows.forEach(row => {
+                const mountName = row.dataset.mount;
+                const statusElement = row.querySelector('.mount-status');
+                const connectionsCell = row.querySelector('.mount-connections');
                 
                 if (window.onlineMounts) {
                     const isOnline = mountName in window.onlineMounts;
-                    statusElement.innerHTML = isOnline ? 
-                        '<span style="color: #28a745; font-weight: bold;">● 在线</span>' : 
-                        '<span style="color: #6c757d;">○ 离线</span>';
+                    const mountData = window.onlineMounts[mountName];
+                    
+                    if (statusElement) {
+                        statusElement.innerHTML = isOnline ? 
+                            '<span style="color: #28a745; font-weight: bold;">● 在线</span>' : 
+                            '<span style="color: #6c757d;">○ 离线</span>';
+                    }
+                    
+                    if (connectionsCell && mountData) {
+                        const connectionCount = mountData.connections || mountData.connection_count || 0;
+                        connectionsCell.textContent = connectionCount;
+                    }
                 }
-            }
-        });
+            });
+        }
     }
     
     updateDashboardCounts();
@@ -3878,3 +3911,5 @@ function renderConnectionEvents(events, statistics, pagination = null) {
 
     container.innerHTML = html;
 }
+
+
