@@ -132,6 +132,8 @@ class ServiceManager:
         self.system_stats_cache = {}  # 缓存系统统计数据供Web API使用
         self.cleanup_thread = None  # 连接事件日志清理线程
         self.cleanup_interval = 7 * 24 * 3600  # 清理间隔（秒），默认每周一次
+        self.mobile_data_cleanup_thread = None  # 移动站 GGA 数据清理线程
+        self.mobile_data_cleanup_interval = 3600  # 清理间隔（秒），默认每小时一次（按条数）
         
     def start_all_services(self):
         """启动所有服务"""
@@ -170,9 +172,26 @@ class ServiceManager:
             
             # 启动统计监控线程
             self._start_stats_monitor()
-            
+
+            # 立即在后台线程一次性预填统计缓存，避免首个Web请求等待
+            def _seed_stats():
+                try:
+                    time.sleep(1)
+                    if self.running:
+                        self._update_system_stats()
+                except Exception as e:
+                    logger.log_error(f"预填统计缓存失败: {e}")
+
+            Thread(target=_seed_stats, daemon=True).start()
+
             # 启动数据库清理线程（定时清理旧连接事件日志）
             self._start_cleanup_worker()
+
+            # 启动移动站 GGA 数据清理线程（按条数上限清理）
+            self._start_mobile_data_cleanup_worker()
+
+            # 启动用户连接超时清理线程（防止 keep-alive 未检测到的网络断开）
+            self._start_stale_user_cleanup_worker()
             
             # 主循环 - 保持服务运行
             self._main_loop()
@@ -228,7 +247,7 @@ class ServiceManager:
                 self.db_manager.cleanup_old_connection_events(config.DB_RETENTION_DAYS)
         except Exception as e:
             logger.log_error(f'首次清理连接事件日志失败: {e}', exc_info=True)
-        
+
         while self.running:
             try:
                 time.sleep(self.cleanup_interval)
@@ -236,7 +255,67 @@ class ServiceManager:
                     self.db_manager.cleanup_old_connection_events(config.DB_RETENTION_DAYS)
             except Exception as e:
                 logger.log_error(f'定时清理连接事件日志失败: {e}', exc_info=True)
- 
+
+    def _start_mobile_data_cleanup_worker(self):
+        """启动移动站 GGA 数据清理线程（按条数上限）"""
+        self.mobile_data_cleanup_thread = Thread(target=self._mobile_data_cleanup_worker, daemon=True)
+        self.mobile_data_cleanup_thread.start()
+        logger.log_system_event(f'已启动移动站 GGA 数据清理线程，保留条数: {config.MOBILE_DATA_MAX_RECORDS}，清理周期: 每小时一次')
+
+    def _mobile_data_cleanup_worker(self):
+        """移动站 GGA 数据清理工作线程（按条数上限裁剪）"""
+        # 首次启动时立即执行一次，避免重启前积累过多记录
+        try:
+            if self.db_manager:
+                self.db_manager.cleanup_old_mobile_data(config.MOBILE_DATA_MAX_RECORDS)
+        except Exception as e:
+            logger.log_error(f'首次清理移动站 GGA 数据失败: {e}', exc_info=True)
+
+        while self.running:
+            try:
+                time.sleep(self.mobile_data_cleanup_interval)
+                if self.running and self.db_manager:
+                    self.db_manager.cleanup_old_mobile_data(config.MOBILE_DATA_MAX_RECORDS)
+            except Exception as e:
+                logger.log_error(f'定时清理移动站 GGA 数据失败: {e}', exc_info=True)
+
+    def _start_stale_user_cleanup_worker(self):
+        """启动超时用户连接清理线程（防止 keep-alive 未检测到的网络断开）"""
+        self.stale_user_cleanup_thread = Thread(target=self._stale_user_cleanup_worker, daemon=True)
+        self.stale_user_cleanup_thread.start()
+        logger.log_system_event('已启动用户连接超时清理线程，清理周期: 每5分钟，深度探测每小时一次')
+
+    def _stale_user_cleanup_worker(self):
+        """用户连接超时清理工作线程
+
+        每 5 分钟做一次轻量级清理（仅按 last_activity 时间判断），每小时做一次深度清理
+        （主动 select+MSG_PEEK 探测 socket）。这样既不会消耗太多 CPU 也能及时回收
+        因网络问题悄悄断开的用户连接，确保 mount_offline 事件不会丢失。
+        """
+        import time as _time
+        idle_threshold = 300   # 5 分钟无活动视为可疑
+        deep_check_interval = 12  # 每 12 * 5min = 1 小时做一次深度探测
+        cycles = 0
+
+        while self.running:
+            try:
+                _time.sleep(300)  # 5 分钟
+                if not self.running:
+                    break
+                cycles += 1
+                force = (cycles % deep_check_interval == 0)
+                try:
+                    cm = connection.get_connection_manager()
+                    cm.cleanup_stale_user_connections(
+                        max_idle_seconds=idle_threshold,
+                        force_check=force,
+                    )
+                except Exception as inner:
+                    logger.log_error(f'超时清理用户连接失败: {inner}', exc_info=True)
+            except Exception as e:
+                logger.log_error(f'超时清理线程异常: {e}', exc_info=True)
+                _time.sleep(60)
+
     def _stats_monitor_worker(self):
         """统计监控工作线程"""
         while self.running:
@@ -250,8 +329,8 @@ class ServiceManager:
     def _update_system_stats(self):
         """更新系统统计信息到缓存"""
         try:
-            # 获取系统性能数据
-            cpu_percent = psutil.cpu_percent(interval=1)
+            # 获取系统性能数据（interval=None 非阻塞，避免1秒阻塞）
+            cpu_percent = psutil.cpu_percent(interval=None)
             memory = psutil.virtual_memory()
             
             # 获取网络统计
@@ -294,11 +373,11 @@ class ServiceManager:
     def get_system_stats(self):
         """获取系统统计数据供Web API使用"""
         try:
+            # 缓存为空时只需返回空数据，由后台统计线程负责填充，避免阻塞Web请求线程
             stats = self.system_stats_cache.copy()
             if not stats:
-                # 如果缓存为空，立即更新一次
-                self._update_system_stats()
-                stats = self.system_stats_cache.copy()
+                logger.log_info("系统统计缓存为空，等待后台线程填充")
+                return {}
             
             # 格式化数据供前端使用
             if stats:

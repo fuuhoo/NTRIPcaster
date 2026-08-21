@@ -4,12 +4,14 @@
 import time
 import socket
 import threading
+import queue
 import re
 from collections import deque
 from threading import Lock, RLock
 from . import config
 from . import logger
 from . import connection
+from . import database
 
 class RingBuffer:
     """环形缓冲区"""
@@ -125,13 +127,28 @@ class SimpleDataForwarder:
         
         self.clients = {}  # {mount_name: [client_info]}
         self.client_lock = RLock()
-        
+
         self.subscribers = {}  # {mount_name: [socket_write_end]}
         self.subscriber_lock = RLock()
-        
+
         self.broadcast_thread = None
         self.running = False
-        
+
+        # GGA读取：使用单一selector线程复用所有客户端socket，避免每客户端一个线程
+        self.gga_selector = None
+        self.gga_buffers = {}      # {socket: bytes buffer}
+        self.gga_reader_lock = RLock()
+        self.gga_thread = None
+        self.gga_running = False
+
+        # 移动站 GGA 数据异步写库：GGA 读取线程仅入队，由独立线程批量入库，避免阻塞 IO 循环
+        self.mobile_data_queue = queue.Queue(maxsize=20000)
+        self.mobile_data_writer_thread = None
+        self.mobile_data_writer_running = False
+        # 批量写库参数：达到 FLUSH_BATCH 条 或 距上次写入超过 FLUSH_INTERVAL 秒 即触发
+        self.MOBILE_DATA_FLUSH_BATCH = 200
+        self.MOBILE_DATA_FLUSH_INTERVAL = 0.5
+
         self.stats = {
             'total_clients': 0,
             'active_clients': 0,
@@ -145,25 +162,35 @@ class SimpleDataForwarder:
         """启动广播线程"""
         if self.running:
             return
-            
+
         self.running = True
         self.broadcast_thread = threading.Thread(target=self._broadcast_loop, daemon=True)
         self.broadcast_thread.start()
+
+        # 启动移动站 GGA 数据异步写库线程
+        self._start_mobile_data_writer()
+
         logger.log_system_event('数据转发器已启动')
-    
+
     def stop(self):
         """停止广播线程"""
         self.running = False
-        
+
         if self.broadcast_thread and self.broadcast_thread.is_alive():
             self.broadcast_thread.join(timeout=5)
-        
+
+        # 停止GGA读取线程
+        self._stop_gga_reader()
+
+        # 停止移动站数据写库线程（会 flush 队列里残留的数据）
+        self._stop_mobile_data_writer()
+
         # 关闭所有客户端连接
         with self.client_lock:
             for mount_clients in self.clients.values():
                 for client_info in mount_clients[:]:
                     self._close_client(client_info)
-                    
+
         logger.log_system_event('数据转发器已停止')
     
     def add_client(self, client_socket, user, mount, agent, addr, protocol_version, connection_id=None):
@@ -202,7 +229,7 @@ class SimpleDataForwarder:
                 if len(user_connections) >= config.MAX_USERS_PER_MOUNT:
                     
                     oldest = min(user_connections, key=lambda x: x['connected_at'])
-                    self.remove_client(oldest)
+                    self.remove_client(oldest, reason="超出每挂载点最大连接数")
                 
                 self.clients[mount].append(client_info)
                 
@@ -225,33 +252,94 @@ class SimpleDataForwarder:
             raise
     
     def _start_gga_reader(self, client_info):
-        """启动GGA读取线程，非阻塞读取移动站发送的NMEA GGA数据"""
-        def gga_reader():
-            socket_obj = client_info.get('socket')
-            if not socket_obj:
-                return
-            
-            # Set non-blocking mode with timeout for reading
+        """注册客户端socket到单一线程的selector轮询（不再为每个客户端单独起线程）"""
+        socket_obj = client_info.get('socket')
+        if not socket_obj:
+            return
+
+        try:
+            socket_obj.setblocking(False)
+        except (OSError, ValueError):
+            return
+
+        with self.gga_reader_lock:
+            if self.gga_selector is None:
+                import selectors
+                self.gga_selector = selectors.DefaultSelector()
+            self.gga_selector.register(socket_obj, selectors.EVENT_READ, client_info)
+            self.gga_buffers[socket_obj] = b''
+            self._ensure_gga_reader()
+
+    def _ensure_gga_reader(self):
+        """确保单一线程的GGA读取循环已启动"""
+        if self.gga_running:
+            return
+        self.gga_running = True
+        self.gga_thread = threading.Thread(target=self._gga_reader_loop, daemon=True)
+        self.gga_thread.start()
+
+    def _stop_gga_reader(self):
+        """停止GGA读取线程并清理selector"""
+        self.gga_running = False
+        if self.gga_thread and self.gga_thread.is_alive():
+            self.gga_thread.join(timeout=2)
+        if self.gga_selector is not None:
             try:
-                socket_obj.setblocking(False)
-            except (OSError, ValueError):
-                return
-            
-            buffer = b''
-            while True:
-                try:
-                    # Non-blocking read with small chunk
-                    data = socket_obj.recv(1024)
-                    if not data:
-                        break
-                    buffer += data
-                    
-                    # Process buffer for GGA messages
+                self.gga_selector.close()
+            except Exception:
+                pass
+            self.gga_selector = None
+        self.gga_buffers.clear()
+
+    def _gga_reader_loop(self):
+        """单一GGA读取循环：用selector复用所有客户端socket"""
+        import selectors
+        while self.gga_running:
+            try:
+                if self.gga_selector is None:
+                    time.sleep(0.2)
+                    continue
+
+                events = self.gga_selector.select(timeout=0.5)
+                for key, _ in events:
+                    socket_obj = key.fileobj
+                    client_info = key.data
+                    try:
+                        data = socket_obj.recv(4096)
+                        if not data:
+                            # 客户端已断开 (EOF)，注销 selector 并触发完整的客户端清理
+                            self._unregister_gga_socket(socket_obj)
+                            try:
+                                self.remove_client(client_info, reason="GGA 检测到 EOF")
+                            except Exception as e:
+                                logger.log_warning(f"GGA EOF 触发清理失败: {e}", 'ntrip')
+                            continue
+                    except BlockingIOError:
+                        continue
+                    except (OSError, ConnectionResetError, BrokenPipeError):
+                        # socket 错误，注销 selector 并触发清理
+                        self._unregister_gga_socket(socket_obj)
+                        try:
+                            self.remove_client(client_info, reason="GGA socket 错误")
+                        except Exception as e:
+                            logger.log_warning(f"GGA socket错误触发清理失败: {e}", 'ntrip')
+                        continue
+                    except Exception:
+                        self._unregister_gga_socket(socket_obj)
+                        try:
+                            self.remove_client(client_info, reason="GGA 异常")
+                        except Exception:
+                            pass
+                        continue
+
+                    buffer = self.gga_buffers.get(socket_obj, b'') + data
+                    if len(buffer) > 65536:
+                        buffer = buffer[-65536:]
+
                     while b'\r\n' in buffer or b'\n' in buffer:
-                        # Find line break
                         idx_crlf = buffer.find(b'\r\n')
                         idx_lf = buffer.find(b'\n')
-                        
+
                         if idx_crlf != -1 and (idx_lf == -1 or idx_crlf < idx_lf):
                             line = buffer[:idx_crlf].decode('utf-8', errors='ignore')
                             buffer = buffer[idx_crlf + 2:]
@@ -260,55 +348,104 @@ class SimpleDataForwarder:
                             buffer = buffer[idx_lf + 1:]
                         else:
                             break
-                        
-                        # Parse GGA message
+
                         quality = self._parse_gga_quality(line)
-                        if quality is not None:
+                        if quality is not None and client_info is not None:
                             client_info['gga_quality'] = quality
                             client_info['gga_last_update'] = time.time()
                             # Update connection manager
                             if client_info.get('connection_id') and client_info.get('user'):
-                                connection.update_gga_quality(
-                                    client_info['user'],
-                                    client_info['connection_id'],
-                                    quality
+                                try:
+                                    connection.update_gga_quality(
+                                        client_info['user'],
+                                        client_info['connection_id'],
+                                        quality
+                                    )
+                                except Exception:
+                                    pass
+
+                        # 入队保存到数据库（异步批量写库，不阻塞 IO 循环）
+                        # 只要是 GGA 行就记录，quality 是否有效不影响入库
+                        if self._is_gga_line(line) and client_info is not None:
+                            try:
+                                nmea_type_raw = line.split(',', 1)[0] if line else None
+                                nmea_type = nmea_type_raw.lstrip('$') if nmea_type_raw else None
+                                addr = client_info.get('addr')
+                                ip_address = addr[0] if isinstance(addr, tuple) and addr else None
+                                row = (
+                                    None,  # event_time: None 让 DB 默认填充
+                                    client_info.get('user'),
+                                    client_info.get('mount'),
+                                    ip_address,
+                                    nmea_type,
+                                    line,
+                                    len(line),
                                 )
-                
-                except BlockingIOError:
-                    # No data available, sleep briefly
-                    time.sleep(0.5)
-                except (OSError, ConnectionResetError, BrokenPipeError):
-                    break
+                                self.mobile_data_queue.put_nowait(row)
+                            except queue.Full:
+                                # 队列满：丢弃最旧的数据并重试（保证新数据优先）
+                                try:
+                                    self.mobile_data_queue.get_nowait()
+                                except Exception:
+                                    pass
+                                try:
+                                    self.mobile_data_queue.put_nowait(row)
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+
+                    self.gga_buffers[socket_obj] = buffer
+
+            except Exception:
+                # 避免selector单点异常导致整个读循环退出
+                try:
+                    time.sleep(0.2)
                 except Exception:
                     break
-        
-        # Start GGA reader thread
-        reader_thread = threading.Thread(target=gga_reader, daemon=True)
-        reader_thread.start()
+
+        # 循环结束清理selector
+        if self.gga_selector is not None:
+            try:
+                self.gga_selector.close()
+            except Exception:
+                pass
+
+    def _unregister_gga_socket(self, socket_obj):
+        """从selector注销客户端socket并清理缓冲区"""
+        try:
+            if self.gga_selector is not None:
+                self.gga_selector.unregister(socket_obj)
+        except Exception:
+            pass
+        try:
+            self.gga_buffers.pop(socket_obj, None)
+        except Exception:
+            pass
     
     def _parse_gga_quality(self, line):
         """解析NMEA GGA消息，返回定位质量码
-        
+
         GGA格式: $GNGGA,time,lat,N,lon,E,quality,sats,hdop,alt,M,geoid,M,age,ref*cs\r\n
         quality: 0=无效, 1=GPS单点, 2=DGPS, 4=RTK固定, 5=RTK浮点, 6=估算
         """
         if not line or not line.startswith('$G') or 'GGA' not in line:
             return None
-        
+
         try:
             parts = line.split(',')
             if len(parts) < 7:
                 return None
-            
+
             # Check if it's a valid GGA message
             msg_type = parts[0]
             if not (msg_type.endswith('GGA') and msg_type.startswith('$G')):
                 return None
-            
+
             quality_str = parts[6]
             if quality_str == '' or quality_str is None:
                 return None
-            
+
             quality = int(quality_str)
             # Valid quality codes: 0-8
             if 0 <= quality <= 8:
@@ -316,6 +453,108 @@ class SimpleDataForwarder:
             return None
         except (ValueError, IndexError):
             return None
+
+    def _is_gga_line(self, line):
+        """判断是否为 GGA 行（不要求 quality 字段有效）
+
+        与 _parse_gga_quality 相比：仅做结构判定，quality 字段是否合法不影响返回值。
+        用于「数据查看」全量记录 GGA 报文。
+        """
+        if not line or not line.startswith('$G'):
+            return False
+        parts = line.split(',')
+        if len(parts) < 7:
+            return False
+        msg_type = parts[0]
+        return msg_type.endswith('GGA') and msg_type.startswith('$G')
+
+    def _start_mobile_data_writer(self):
+        """启动移动站 GGA 数据异步写库线程"""
+        if self.mobile_data_writer_running:
+            return
+        self.mobile_data_writer_running = True
+        self.mobile_data_writer_thread = threading.Thread(target=self._mobile_data_writer_loop, daemon=True)
+        self.mobile_data_writer_thread.start()
+        logger.log_system_event('移动站 GGA 数据写库线程已启动')
+
+    def _stop_mobile_data_writer(self):
+        """停止移动站 GGA 数据写库线程，并 flush 队列中残留数据"""
+        if not self.mobile_data_writer_running:
+            return
+        self.mobile_data_writer_running = False
+        if self.mobile_data_writer_thread and self.mobile_data_writer_thread.is_alive():
+            self.mobile_data_writer_thread.join(timeout=5)
+
+        # flush 残留（最多 5 次批量），避免最后几条数据丢失
+        for _ in range(5):
+            rows = self._drain_queue(self.MOBILE_DATA_FLUSH_BATCH)
+            if not rows:
+                break
+            try:
+                database.add_mobile_data_batch(rows)
+            except Exception:
+                pass
+
+    def _drain_queue(self, max_items):
+        """从队列中取出最多 max_items 条数据"""
+        rows = []
+        try:
+            while len(rows) < max_items:
+                rows.append(self.mobile_data_queue.get_nowait())
+        except queue.Empty:
+            pass
+        return rows
+
+    def _mobile_data_writer_loop(self):
+        """移动站 GGA 数据写库工作循环
+
+        触发批量写入的条件：
+        1. 队列中累积条数 >= FLUSH_BATCH
+        2. 距上次写入时间 >= FLUSH_INTERVAL 秒
+        """
+        last_flush_time = time.time()
+        while self.mobile_data_writer_running:
+            try:
+                # 1) 立即取满一个 batch
+                rows = self._drain_queue(self.MOBILE_DATA_FLUSH_BATCH)
+
+                # 2) 如果批量未满，则用短超时等待凑够或超时
+                if len(rows) < self.MOBILE_DATA_FLUSH_BATCH:
+                    wait_seconds = self.MOBILE_DATA_FLUSH_INTERVAL - (time.time() - last_flush_time)
+                    if wait_seconds > 0:
+                        try:
+                            extra = self.mobile_data_queue.get(timeout=wait_seconds)
+                            rows.append(extra)
+                        except queue.Empty:
+                            pass
+
+                if rows:
+                    try:
+                        written = database.add_mobile_data_batch(rows)
+                        if written == 0 and rows:
+                            # 整批失败：把数据放回队首，下次重试（避免静默丢失）
+                            for row in rows:
+                                try:
+                                    self.mobile_data_queue.put_nowait(row)
+                                except queue.Full:
+                                    # 还是满就丢弃最旧的
+                                    try:
+                                        self.mobile_data_queue.get_nowait()
+                                        self.mobile_data_queue.put_nowait(row)
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                            time.sleep(0.5)
+                    except Exception as e:
+                        logger.log_error(f'批量写入移动站数据失败: {e}', exc_info=True)
+                    last_flush_time = time.time()
+                else:
+                    # 队列空时小憩，避免 busy loop
+                    time.sleep(0.05)
+            except Exception as e:
+                logger.log_error(f'移动站数据写库线程异常: {e}', exc_info=True)
+                time.sleep(0.5)
 
     def _enable_keepalive(self, client_socket):
         """TCP Keep-Alive"""
@@ -347,27 +586,27 @@ class SimpleDataForwarder:
         except Exception as e:
             logger.log_warning(f"设置TCP Keep-Alive失败: {e}", 'ntrip')
     
-    def remove_client(self, client_info):
+    def remove_client(self, client_info, reason="客户端断开"):
         """移除客户端连接"""
         try:
             self._close_client(client_info)
-            
+
             with self.client_lock:
-                
+
                 mount = client_info['mount']
                 if mount in self.clients and client_info in self.clients[mount]:
                     self.clients[mount].remove(client_info)
-                    
+
                     if not self.clients[mount]:
                         del self.clients[mount]
-                
+
                 self.stats['active_clients'] = sum(len(clients) for clients in self.clients.values())
                 self.stats['disconnected_clients'] += 1
-            
+
             connection.remove_user_connection(
-                client_info['user'], 
-                client_info['addr'][0], 
-                client_info['mount']
+                client_info['user'],
+                mount_name=client_info['mount'],
+                reason=reason,
             )
             
             logger.log_client_disconnect(
@@ -383,6 +622,8 @@ class SimpleDataForwarder:
         """关闭客户端连接"""
         try:
             socket_obj = client_info['socket']
+            # 先从GGA selector注销，避免已关闭socket被select返回
+            self._unregister_gga_socket(socket_obj)
             socket_obj.close()
         except Exception as e:
             logger.log_debug(f"关闭客户端连接失败: {e}", 'ntrip')
@@ -556,7 +797,7 @@ class SimpleDataForwarder:
         
         for client_info in clients_to_remove:
             try:
-                self.remove_client(client_info)
+                self.remove_client(client_info, reason="强制断开")
                 disconnected_count += 1
                 logger.log_info(f"强制断开用户 {username} 的连接: {client_info['mount']}")
             except Exception as e:

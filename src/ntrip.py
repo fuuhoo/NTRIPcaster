@@ -1176,18 +1176,29 @@ a=control:*
             
             # 添加到连接管理器
             connection_id = connection.add_user_connection(self.username, mount, self.client_address[0])
-            
+
             # 添加客户端到转发器
             try:
                 self.client_info = forwarder.add_client(self.client_socket, self.username, mount,
-                                                       self.user_agent, self.client_address, 
+                                                       self.user_agent, self.client_address,
                                                        self.ntrip_version, connection_id)
                 if not self.client_info:
                     self.send_error_response(500, "Failed to add client")
+                    # 修复：add_user_connection 已成功（已记录 mount_online 并加入 online_users），
+                    #      此处必须回滚，否则用户永远卡在 online 状态，mount_offline 永远丢失
+                    try:
+                        connection.remove_user_connection(self.username, mount_name=mount, reason="添加到转发器失败")
+                    except Exception as cleanup_err:
+                        logger.log_error(f"add_user_connection 回滚失败: {cleanup_err}", exc_info=True)
                     return
             except Exception as e:
                 logger.log_error(f"添加客户端失败: {e}", exc_info=True)
                 self.send_error_response(500, "Failed to add client")
+                # 修复：同上，必须回滚 add_user_connection
+                try:
+                    connection.remove_user_connection(self.username, mount_name=mount, reason="添加到转发器异常")
+                except Exception as cleanup_err:
+                    logger.log_error(f"add_user_connection 回滚失败: {cleanup_err}", exc_info=True)
                 return
             
             self.send_download_success_response()
@@ -1275,29 +1286,63 @@ a=control:*
             self._cleanup()
     
     def _keep_connection_alive(self):
-        """保持下载连接活跃）"""
+        """保持下载连接活跃 + 可靠检测客户端断开
+
+        旧实现用 getsockopt(SO_ERROR) 检测断开，对客户端正常 FIN 关闭无能为力，
+        会导致用户卡在 online_users 状态、mount_offline 永远不记录。
+        新实现用 select() 等待 socket 可读，recv(MSG_PEEK) 判 EOF。
+        """
+        import select
         try:
-            
             while True:
-                time.sleep(5)  
-                
-                if hasattr(self, 'client_info') and self.client_info:
-                    
-                    try:
-                        
-                        self.client_socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-                    except (OSError, AttributeError):
-                        break
-                else:
+                # select 5s 超时，避免长时间阻塞
+                try:
+                    r, _, _ = select.select([self.client_socket], [], [], 5.0)
+                except (OSError, ValueError):
+                    # socket 已被关闭
                     break
-        except:
-            
-            pass
+
+                if r:
+                    # socket 可读：用 MSG_PEEK 判断是 EOF 还是真实数据
+                    try:
+                        data = self.client_socket.recv(1, socket.MSG_PEEK)
+                        if not data:
+                            # 客户端正常关闭 (FIN)，EOF
+                            log_info(f"客户端 {self.client_address} 已关闭连接 (EOF)")
+                            break
+                        # 有数据（下载连接一般不收数据，但 NTRIP 客户端偶尔会发 NMEA GGA）
+                        # 实际读取并丢弃，避免下次 select 一直触发
+                        try:
+                            self.client_socket.recv(4096)
+                        except OSError:
+                            break
+                    except (BlockingIOError, InterruptedError):
+                        # 暂时无数据，继续等
+                        pass
+                    except ConnectionResetError:
+                        log_info(f"客户端 {self.client_address} 连接被重置")
+                        break
+                    except OSError as e:
+                        log_info(f"客户端 {self.client_address} socket 错误: {e}")
+                        break
+
+                # 兜底：检查 SO_ERROR 抓 RST 等非 EOF 错误
+                try:
+                    err = self.client_socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if err != 0:
+                        log_info(f"客户端 {self.client_address} SO_ERROR={err}")
+                        break
+                except OSError:
+                    break
+        except Exception as e:
+            log_debug(f"keep-alive 异常: {e}")
         finally:
-            
             if hasattr(self, 'client_info') and self.client_info:
-                forwarder.remove_client(self.client_info)
-                logger.log_client_disconnect(self.username, self.mount, self.client_address[0])
+                try:
+                    forwarder.remove_client(self.client_info)
+                    logger.log_client_disconnect(self.username, self.mount, self.client_address[0])
+                except Exception as e:
+                    log_error(f"keep-alive 清理失败: {e}")
     
     def _send_mount_list(self):
         """发送挂载点列表"""
@@ -1535,8 +1580,14 @@ a=control:*
 
             if hasattr(self, 'username') and hasattr(self, 'mount'):
                 if hasattr(self, 'client_info'):  # 下载连接
-                    # print(f">>> 移除用户连接 - 用户: {self.username}, 挂载点: {self.mount}")
-                    connection.remove_user_connection(self.username, self.client_address[0], self.mount)
+                    # 使用关键字参数：第二个位置本意是 IP，但旧代码把它当 connection_id 传给
+                    # remove_user_connection，IP 永远匹配不到生成的 connection_id，靠 mount_name 兜底。
+                    # 显式传 mount_name= 避免歧义。
+                    connection.remove_user_connection(
+                        self.username,
+                        mount_name=self.mount,
+                        reason="客户端断开",
+                    )
                 else:  # 上传连接
                     # 只有真正成功建立的挂载点连接才在断开时移除
                     if hasattr(self, 'mount_connection_established') and self.mount_connection_established:

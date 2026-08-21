@@ -198,7 +198,114 @@ class ConnectionManager:
                     
         except Exception as e:
             log_error(f"清理僵尸连接时发生异常: {e}", exc_info=True)
-    
+
+    def cleanup_stale_user_connections(self, max_idle_seconds=300, force_check=False):
+        """清理空闲过久的用户连接（防止 keep-alive 未检测到的断开）
+
+        当客户端因网络问题（4G 抖动、NAT 超时等）悄悄断开时，TCP 层可能不发送 FIN/RST，
+        服务端的 keep-alive 也可能检测不到（半开连接），导致用户卡在 online_users 状态、
+        mount_offline 事件永远丢失。
+
+        本方法在 force_check=True 时主动探测 socket（MSG_PEEK），否则用最近活动时间判断。
+        """
+        import select as _select
+        with self.user_lock:
+            current_time = time.time()
+            stale = []  # (username, indices) 待删除
+
+            for username, conns in list(self.online_users.items()):
+                stale_indices = []
+                for i, conn in enumerate(conns):
+                    last_activity = conn.get('last_activity', conn.get('connect_time', current_time))
+                    idle_seconds = current_time - last_activity
+                    if idle_seconds < max_idle_seconds:
+                        continue
+
+                    sock = conn.get('client_socket')
+                    should_remove = False
+                    if sock is None:
+                        should_remove = True
+                    elif force_check:
+                        try:
+                            r, _, _ = _select.select([sock], [], [], 0.0)
+                            if r:
+                                try:
+                                    data = sock.recv(1, socket.MSG_PEEK)
+                                    if not data:
+                                        should_remove = True
+                                except (BlockingIOError, InterruptedError):
+                                    pass
+                                except OSError:
+                                    should_remove = True
+                        except (OSError, ValueError):
+                            should_remove = True
+                    if should_remove:
+                        stale_indices.append(i)
+
+                if stale_indices:
+                    stale.append((username, stale_indices))
+
+            cleaned = 0
+            for username, indices in stale:
+                if username not in self.online_users:
+                    continue
+                for i in reversed(indices):
+                    if i >= len(self.online_users[username]):
+                        continue
+                    conn = self.online_users[username][i]
+                    uptime = round(current_time - conn.get('connect_time', current_time), 1)
+                    # 记录离线事件（用独立 try 避免一处异常影响其他）
+                    try:
+                        notification.notify_mount_offline(
+                            conn['mount_name'],
+                            conn['ip_address'],
+                            username=username,
+                            connect_time=conn.get('connect_datetime', '未知'),
+                            uptime=uptime,
+                            reason="超时清理"
+                        )
+                    except Exception as e:
+                        log_error(f"超时清理通知失败: {e}")
+                    try:
+                        database.add_connection_event(
+                            event_type='mount_offline',
+                            mount_name=conn['mount_name'],
+                            username=username,
+                            ip_address=conn['ip_address'],
+                            duration=uptime,
+                            reason="超时清理",
+                            details=f"连接时间: {conn.get('connect_datetime', '未知')}, 空闲 {int(current_time - conn.get('last_activity', current_time))}s"
+                        )
+                    except Exception as e:
+                        log_error(f"超时清理事件记录失败: {e}")
+
+                    # 关闭 socket
+                    sock = conn.get('client_socket')
+                    if sock is not None:
+                        try:
+                            sock.close()
+                        except Exception:
+                            pass
+
+                    # 维护计数
+                    mname = conn.get('mount_name')
+                    if mname in self.mount_connection_count:
+                        self.mount_connection_count[mname] -= 1
+                    del self.online_users[username][i]
+                    if username in self.user_connection_count:
+                        self.user_connection_count[username] -= 1
+                    cleaned += 1
+                    log_info(f"超时清理用户连接: {username}@{mname}, idle={int(current_time - conn.get('last_activity', current_time))}s")
+
+                if username in self.online_users and not self.online_users[username]:
+                    del self.online_users[username]
+                    if username in self.user_connection_count:
+                        del self.user_connection_count[username]
+
+            if cleaned:
+                log_info(f"超时清理完成，共清理 {cleaned} 个用户连接")
+            return cleaned
+
     def add_mount_connection(self, mount_name, ip_address, user_agent="", protocol_version="1.0", client_socket=None):
         """添加挂载点连接上传端"""
         with self.mount_lock:
@@ -418,14 +525,14 @@ class ConnectionManager:
             
             return connection_id
     
-    def remove_user_connection(self, username, connection_id=None, mount_name=None):
+    def remove_user_connection(self, username, connection_id=None, mount_name=None, reason="主动断开"):
         """移除用户连接"""
         with self.user_lock:
             if username not in self.online_users:
                 return False
-            
+
             connections_to_remove = []
-            
+
             for i, conn in enumerate(self.online_users[username]):
                 should_remove = False
                 
@@ -455,9 +562,9 @@ class ConnectionManager:
                         username=username,
                         connect_time=conn.get('connect_datetime', '未知'),
                         uptime=uptime,
-                        reason="主动断开"
+                        reason=reason
                     )
-                    
+
                     # 记录用户挂载点连接下线事件到数据库
                     database.add_connection_event(
                         event_type='mount_offline',
@@ -465,11 +572,11 @@ class ConnectionManager:
                         username=username,
                         ip_address=conn['ip_address'],
                         duration=uptime,
-                        reason="主动断开",
+                        reason=reason,
                         details=f"连接时间: {conn.get('connect_datetime', '未知')}"
                     )
-                    
-                    log_info(f"用户 {username} 已从挂载点 {conn['mount_name']} 断开")
+
+                    log_info(f"用户 {username} 已从挂载点 {conn['mount_name']} 断开（{reason}）")
             
 
             for i in reversed(connections_to_remove):
@@ -586,6 +693,19 @@ class ConnectionManager:
         """获取在线用户列表"""
         with self.user_lock:
             return dict(self.online_users)
+
+    def get_online_users_api(self) -> Dict[str, list]:
+        """获取在线用户列表（API/推送安全副本，剥离开client_socket避免JSON序列化失败）"""
+        with self.user_lock:
+            users = {}
+            for username, conn_list in self.online_users.items():
+                safe_list = []
+                for conn in conn_list:
+                    c = conn.copy()
+                    c.pop('client_socket', None)
+                    safe_list.append(c)
+                users[username] = safe_list
+            return users
     
     def get_mount_info(self, mount_name):
         """获取挂载点信息"""
@@ -611,6 +731,55 @@ class ConnectionManager:
                     conn_copy.pop('client_socket', None)
                     connections.append(conn_copy)
             return connections
+
+    def get_all_user_connections_enriched(self, mount_filter=None, username_filter=None):
+        """获取所有移动站连接列表（一次遍历一次性计算所有派生字段，避免逐连接重复加锁）
+
+        返回每条连接附带：is_diffing、data_rate、gga_quality
+        """
+        diffing_timeout = getattr(config, 'DIFFING_TIMEOUT', 10)
+        now = time.time()
+
+        with self.user_lock:
+            result = []
+            for user, conn_list in self.online_users.items():
+                if username_filter and username_filter.lower() not in user.lower():
+                    continue
+                for conn in conn_list:
+                    if mount_filter and mount_filter.lower() not in conn.get('mount_name', '').lower():
+                        continue
+
+                    bytes_sent = conn.get('bytes_sent', 0) or 0
+                    last_activity = conn.get('last_activity')
+                    is_diffing = bool(
+                        bytes_sent > 0
+                        and last_activity is not None
+                        and (now - last_activity) <= diffing_timeout
+                    )
+
+                    diff_start = conn.get('diff_start_time') or conn.get('connect_time') or now
+                    elapsed = now - diff_start
+                    data_rate = (bytes_sent / elapsed) if elapsed > 0 else 0.0
+
+                    quality = conn.get('gga_quality')
+                    gga_last_update = conn.get('gga_last_update')
+                    gga_quality = None
+                    if quality is not None and gga_last_update is not None:
+                        if now - gga_last_update <= 30:
+                            gga_quality = quality
+
+                    result.append({
+                        'connection_id': conn.get('connection_id', ''),
+                        'username': user,
+                        'mount_name': conn.get('mount_name', ''),
+                        'ip_address': conn.get('ip_address', ''),
+                        'connect_time': conn.get('connect_datetime', '-'),
+                        'bytes_sent': bytes_sent,
+                        'data_rate': round(data_rate, 3),
+                        'is_diffing': is_diffing,
+                        'gga_quality': gga_quality
+                    })
+            return result
 
     def is_user_connection_diffing(self, username, connection_id):
         """判断用户连接是否正在进行差分
@@ -987,9 +1156,9 @@ def add_user_connection(username, mount_name, ip_address, user_agent="", protoco
     """添加用户连接"""
     return get_connection_manager().add_user_connection(username, mount_name, ip_address, user_agent, protocol_version, client_socket)
 
-def remove_user_connection(username, connection_id=None, mount_name=None):
+def remove_user_connection(username, connection_id=None, mount_name=None, reason="主动断开"):
     """移除用户连接"""
-    return get_connection_manager().remove_user_connection(username, connection_id, mount_name)
+    return get_connection_manager().remove_user_connection(username, connection_id=connection_id, mount_name=mount_name, reason=reason)
 
 def update_user_activity(username, connection_id, bytes_sent=0):
     """更新用户活动"""

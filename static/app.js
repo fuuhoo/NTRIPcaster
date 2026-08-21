@@ -15,6 +15,10 @@ socket.on('connect', function() {
     connectionStatus = 'connected';
     // console.log('WebSocket connection established');
     updateConnectionStatus();
+    // 重连后重新加入RTCM实时视图房间（房间绑定的是连接，断开后失效）
+    if (currentMountName) {
+        socket.emit('join_rtcm_room', { mount: currentMountName });
+    }
     // If currently on dashboard page, request system statistics
     if (currentPage === 'dashboard') {
         requestSystemStats();
@@ -31,6 +35,10 @@ socket.on('reconnect', function(attemptNumber) {
     connectionStatus = 'connected';
     // console.log('WebSocket reconnection successful, attempt number:', attemptNumber);
     updateConnectionStatus();
+    // 重连成功后重新加入RTCM实时视图房间
+    if (currentMountName) {
+        socket.emit('join_rtcm_room', { mount: currentMountName });
+    }
 });
 
 socket.on('reconnect_attempt', function(attemptNumber) {
@@ -84,7 +92,7 @@ function updateConnectionStatus() {
 // Page navigation
 function navigateTo(page) {
     // Check pages that require login
-    const requireLoginPages = ['users', 'mounts', 'connection_events', 'settings'];
+    const requireLoginPages = ['dashboard', 'users', 'mounts', 'connection_events', 'settings', 'data_view'];
     if (requireLoginPages.includes(page)) {
         // Check login status
         checkLoginStatusForProtectedPage().then(isLoggedIn => {
@@ -111,11 +119,12 @@ function performNavigation(page) {
     document.querySelector(`[data-page="${page}"]`).classList.add('active');
 
     currentPage = page;
-    
+
     // Control log panel display
     const logPanel = document.getElementById('log-panel');
     const mainContent = document.querySelector('.main-content');
-    
+    const contentPanel = document.querySelector('.content-panel');
+
     if (page === 'dashboard') {
         logPanel.style.display = 'block';
         mainContent.classList.add('dashboard-layout');
@@ -123,15 +132,24 @@ function performNavigation(page) {
         logPanel.style.display = 'none';
         mainContent.classList.remove('dashboard-layout');
     }
-    
+
+    // 列表型页面：连接事件 / 数据查看，加 list-page 类让内部表格滚动而非整页滚动
+    const listPages = ['data_view', 'connection_events'];
+    if (listPages.includes(page)) {
+        contentPanel.classList.add('list-page');
+    } else {
+        contentPanel.classList.remove('list-page');
+    }
+
     loadPageContent(page);
 }
 
 // Check login status (for protected pages)
 async function checkLoginStatusForProtectedPage() {
     try {
-        const response = await fetch('/api/users');
-        return response.status !== 401;
+        const response = await fetch('/api/auth/check');
+        const data = await response.json().catch(() => ({}));
+        return response.ok && data.authenticated === true;
     } catch (error) {
         // console.error('Failed to check login status:', error);
         return false;
@@ -141,8 +159,9 @@ async function checkLoginStatusForProtectedPage() {
 // Check login status (original function, maintain compatibility)
 async function checkLoginStatus() {
     try {
-        const response = await fetch('/api/users');
-        if (response.status === 401) {
+        const response = await fetch('/api/auth/check');
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.authenticated !== true) {
             showAlert('登录已过期，请重新登录', 'warning');
             window.location.href = '/login';
             return false;
@@ -235,6 +254,12 @@ async function loadPageContent(page) {
                 contentDiv.parentElement.style.display = 'block';
                 contentDiv.innerHTML = getConnectionEventsContent();
                 loadConnectionEvents(0, 100);
+                break;
+            case 'data_view':
+                // Ensure content panel is displayed on non-dashboard pages
+                contentDiv.parentElement.style.display = 'block';
+                contentDiv.innerHTML = getDataViewContent();
+                loadMobileData(0, 100);
                 break;
             case 'settings':
                 // Ensure content panel is displayed on non-dashboard pages
@@ -334,6 +359,11 @@ function startRTCMParsing(mountName) {
     .then(data => {
         if (data.success) {
             console.log(`[前端] RTCM解析启动成功: ${mountName}`);
+            // 加入RTCM实时视图房间，接收rtcm_realtime_data推送
+            if (socket && socket.connected) {
+                socket.emit('join_rtcm_room', { mount: mountName });
+                console.log(`[前端] 已加入RTCM实时视图房间: ${mountName}`);
+            }
             // 
             setTimeout(() => {
                 fetch('/api/mount/rtcm-parse/status')
@@ -1801,35 +1831,238 @@ function getMonitorContent() {
     `;
 }
 
-// 连接事件内容
-function getConnectionEventsContent() {
+
+// ==================== 数据查看（移动站 GGA 数据） ====================
+
+// 排序状态（每次进入页面由 getDataViewContent 重置为默认）
+let mobileDataSort = { by: 'event_time', order: 'DESC' };
+// 每页条数（每次进入页面由 getDataViewContent 重置为 100）
+let mobileDataPageSize = 100;
+// 各字段的默认排序方向：时间/数字默认 DESC，文本字段默认 ASC
+const MOBILE_DATA_DEFAULT_ORDER = {
+    event_time: 'DESC',
+    username: 'ASC',
+    mount_name: 'ASC',
+};
+// 每页条数可选值
+const MOBILE_DATA_PAGE_SIZE_OPTIONS = [50, 100, 200, 500];
+
+function getDataViewContent() {
+    // 每次进入页面，重置排序状态和每页条数
+    mobileDataSort = { by: 'event_time', order: 'DESC' };
+    mobileDataPageSize = 100;
+    const pageSizeOptions = MOBILE_DATA_PAGE_SIZE_OPTIONS
+        .map(n => `<option value="${n}" ${n === 100 ? 'selected' : ''}>${n} 条/页</option>`)
+        .join('');
     return `
         <div class="page-header">
-            <h3>连接事件日志</h3>
-            <p class="page-subtitle">基站（上传端）和移动站（用户连接/下载端）的上下线记录</p>
+            <h3>数据查看</h3>
+            <p class="page-subtitle">移动站发送给 Caster 的 GGA 定位数据（按条数上限保留最新 <span id="mobile-data-max-records">--</span> 条）</p>
         </div>
         <div class="settings-container" style="max-width: 100%; margin: 0 auto;">
             <div class="settings-section">
                 <div class="form-group" style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 0;">
-                    <select id="connection-event-filter" class="form-control" style="width: auto; min-width: 120px;">
-                        <option value="">全部事件</option>
-                        <option value="base_station_online">基站上线</option>
-                        <option value="base_station_offline">基站下线</option>
-                        <option value="mount_online">移动站上线</option>
-                        <option value="mount_offline">移动站下线</option>
+                    <input type="text" id="mobile-data-user" placeholder="用户名" class="form-control" style="width: auto; min-width: 140px;">
+                    <input type="text" id="mobile-data-mount" placeholder="挂载点名称" class="form-control" style="width: auto; min-width: 140px;">
+                    <input type="datetime-local" id="mobile-data-start" class="form-control" style="width: auto; min-width: 160px;">
+                    <input type="datetime-local" id="mobile-data-end" class="form-control" style="width: auto; min-width: 160px;">
+                    <button onclick="loadMobileData(0, mobileDataPageSize)" class="btn btn-primary">查询</button>
+                    <button onclick="resetMobileDataFilter()" class="btn btn-secondary">重置</button>
+                    <select id="mobile-data-page-size" class="form-control" style="width: auto; min-width: 110px;" onchange="changeMobileDataPageSize(this.value)">
+                        ${pageSizeOptions}
                     </select>
-                    <input type="text" id="connection-event-mount" placeholder="挂载点名称" class="form-control" style="width: auto; min-width: 120px;">
-                    <input type="text" id="connection-event-user" placeholder="用户名" class="form-control" style="width: auto; min-width: 120px;">
-                    <input type="datetime-local" id="connection-event-start" class="form-control" style="width: auto; min-width: 160px;">
-                    <input type="datetime-local" id="connection-event-end" class="form-control" style="width: auto; min-width: 160px;">
-                    <button onclick="loadConnectionEvents()" class="btn btn-primary">查询</button>
                 </div>
             </div>
-            <div id="connection-events-list">
-                <p class="loading-text">正在加载事件日志...</p>
+            <div id="mobile-data-list">
+                <p class="loading-text">正在加载移动站数据...</p>
             </div>
         </div>
     `;
+}
+
+function changeMobileDataPageSize(newSize) {
+    const n = parseInt(newSize, 10);
+    if (!Number.isFinite(n) || n <= 0) return;
+    mobileDataPageSize = n;
+    loadMobileData(0, n);
+}
+
+function resetMobileDataFilter() {
+    const userEl = document.getElementById('mobile-data-user');
+    const mountEl = document.getElementById('mobile-data-mount');
+    const startEl = document.getElementById('mobile-data-start');
+    const endEl = document.getElementById('mobile-data-end');
+    const pageSizeEl = document.getElementById('mobile-data-page-size');
+    if (userEl) userEl.value = '';
+    if (mountEl) mountEl.value = '';
+    if (startEl) startEl.value = '';
+    if (endEl) endEl.value = '';
+    if (pageSizeEl) pageSizeEl.value = '100';
+    mobileDataPageSize = 100;
+    loadMobileData(0, 100);
+}
+
+async function loadMobileData(offset = 0, limit = 100) {
+    try {
+        const username = document.getElementById('mobile-data-user')?.value.trim() || '';
+        const mountName = document.getElementById('mobile-data-mount')?.value.trim() || '';
+        const startInput = document.getElementById('mobile-data-start')?.value || '';
+        const endInput = document.getElementById('mobile-data-end')?.value || '';
+        const startTime = startInput ? startInput.replace('T', ' ') + ':00' : '';
+        const endTime = endInput ? endInput.replace('T', ' ') + ':00' : '';
+
+        const params = new URLSearchParams();
+        if (username) params.append('username', username);
+        if (mountName) params.append('mount_name', mountName);
+        if (startTime) params.append('start_time', startTime);
+        if (endTime) params.append('end_time', endTime);
+        params.append('limit', String(limit));
+        params.append('offset', String(offset));
+        params.append('sort_by', mobileDataSort.by);
+        params.append('sort_order', mobileDataSort.order);
+
+        const response = await fetch('/api/mobile_data?' + params.toString());
+        const result = await handleApiResponse(response);
+        if (result.success) {
+            const maxEl = document.getElementById('mobile-data-max-records');
+            if (maxEl && typeof result.max_records !== 'undefined') {
+                maxEl.textContent = result.max_records.toLocaleString();
+            }
+            // 同步后端确认后的 sort
+            if (result.sort_by) mobileDataSort.by = result.sort_by;
+            if (result.sort_order) mobileDataSort.order = result.sort_order;
+            renderMobileData(result.data || [], {
+                offset: result.offset,
+                limit: result.limit,
+                total: result.total
+            });
+        } else {
+            showAlert('加载移动站数据失败：' + (result.error || '未知错误'), 'error');
+        }
+    } catch (error) {
+        if (error.message !== 'Unauthorized access') {
+            showAlert('加载移动站数据失败：' + error.message, 'error');
+        }
+    }
+}
+
+// 点击列头：相同列切换方向，不同列使用该字段默认方向
+function sortMobileData(column) {
+    if (mobileDataSort.by === column) {
+        mobileDataSort.order = mobileDataSort.order === 'ASC' ? 'DESC' : 'ASC';
+    } else {
+        mobileDataSort.by = column;
+        mobileDataSort.order = MOBILE_DATA_DEFAULT_ORDER[column] || 'ASC';
+    }
+    loadMobileData(0, 100);
+}
+
+function renderMobileData(rows, pagination = null) {
+    const container = document.getElementById('mobile-data-list');
+    if (!container) return;
+
+    let paginationHtml = '';
+    if (pagination) {
+        const { offset, limit, total } = pagination;
+        const currentPage = Math.floor(offset / limit) + 1;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+        const hasPrev = offset > 0;
+        const hasNext = offset + rows.length < total;
+        const firstOffset = 0;
+        const lastOffset = Math.max(0, (totalPages - 1) * limit);
+        const startRange = total > 0 ? offset + 1 : 0;
+        const endRange = offset + rows.length;
+
+        paginationHtml = `
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 0.85em; color: #6c757d;">
+                <div>显示第 ${startRange} - ${endRange} 条，共 ${total} 条</div>
+                <div style="display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
+                    <button class="btn btn-secondary btn-sm" ${!hasPrev ? 'disabled' : ''} onclick="loadMobileData(${firstOffset}, ${limit})" title="首页">« 首页</button>
+                    <button class="btn btn-secondary btn-sm" ${!hasPrev ? 'disabled' : ''} onclick="loadMobileData(${offset - limit}, ${limit})" title="上一页">上一页</button>
+                    <span style="display: inline-flex; align-items: center; gap: 4px;">
+                        第
+                        <input type="number" id="mobile-data-page-input" min="1" max="${totalPages}" value="${currentPage}"
+                               style="width: 60px; padding: 2px 6px; font-size: 0.95em; text-align: center; border: 1px solid #ced4da; border-radius: 3px;"
+                               onkeydown="if(event.key === 'Enter'){ event.preventDefault(); jumpMobileDataPage(${limit}); }" />
+                        / ${totalPages} 页
+                    </span>
+                    <button class="btn btn-primary btn-sm" onclick="jumpMobileDataPage(${limit})" title="跳转到指定页">跳转</button>
+                    <button class="btn btn-secondary btn-sm" ${!hasNext ? 'disabled' : ''} onclick="loadMobileData(${offset + limit}, ${limit})" title="下一页">下一页</button>
+                    <button class="btn btn-secondary btn-sm" ${!hasNext ? 'disabled' : ''} onclick="loadMobileData(${lastOffset}, ${limit})" title="尾页">尾页 »</button>
+                </div>
+            </div>
+        `;
+    }
+
+    if (!rows || rows.length === 0) {
+        container.innerHTML = `
+            <p class="empty-text" style="color: #6c757d; padding: 10px 0;">暂无移动站 GGA 数据。移动站连接后会自动以 1Hz 发送 GGA 报文并保存。</p>
+            ${paginationHtml}
+        `;
+        return;
+    }
+
+    const tableRows = rows.map(r => {
+        const time = r.event_time || '-';
+        const user = r.username ? escapeHtml(r.username) : '-';
+        const mount = r.mount_name ? escapeHtml(r.mount_name) : '-';
+        const nmeaType = r.nmea_type ? escapeHtml(r.nmea_type) : '-';
+        const rawData = r.raw_data ? escapeHtml(r.raw_data) : '-';
+        return `
+            <tr>
+                <td style="white-space: nowrap;">${escapeHtml(time)}</td>
+                <td>${user}</td>
+                <td>${mount}</td>
+                <td><code>${nmeaType}</code></td>
+                <td style="font-family: monospace; font-size: 0.85em; word-break: break-all;">${rawData}</td>
+            </tr>
+        `;
+    }).join('');
+
+    container.innerHTML = `
+        <div class="table-container" style="max-height: 800px; overflow-y: auto;">
+            <table class="data-table" style="min-width: 600px;">
+                <thead style="position: sticky; top: 0; z-index: 1; background: #f8f9fa;">
+                    <tr>
+                        <th style="white-space: nowrap; cursor: pointer; user-select: none;" onclick="sortMobileData('event_time')" title="点击按时间排序">时间 ${sortIndicator('event_time')}</th>
+                        <th style="cursor: pointer; user-select: none;" onclick="sortMobileData('username')" title="点击按用户名排序">用户名 ${sortIndicator('username')}</th>
+                        <th style="cursor: pointer; user-select: none;" onclick="sortMobileData('mount_name')" title="点击按挂载点排序">挂载点 ${sortIndicator('mount_name')}</th>
+                        <th>NMEA 类型</th>
+                        <th>原始数据</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${tableRows}
+                </tbody>
+            </table>
+        </div>
+        ${paginationHtml}
+    `;
+}
+
+// 生成排序方向指示器
+function sortIndicator(column) {
+    if (mobileDataSort.by !== column) return '<span style="color: #adb5bd; font-size: 0.85em;">⇅</span>';
+    const arrow = mobileDataSort.order === 'ASC' ? '↑' : '↓';
+    return `<span style="color: #007bff; font-weight: bold;">${arrow}</span>`;
+}
+
+function jumpMobileDataPage(limit = 100) {
+    const input = document.getElementById('mobile-data-page-input');
+    if (!input) return;
+    let page = parseInt(input.value, 10);
+    if (!Number.isFinite(page) || page < 1) {
+        page = 1;
+        input.value = 1;
+    }
+    // 读取当前实际的总页数，从 input 的 max 属性取
+    const maxPage = parseInt(input.max, 10);
+    if (Number.isFinite(maxPage) && maxPage > 0 && page > maxPage) {
+        page = maxPage;
+        input.value = maxPage;
+    }
+    const offset = (page - 1) * limit;
+    loadMobileData(offset, limit);
 }
 
 // settings
@@ -3754,19 +3987,7 @@ async function loadAppInfo() {
         const response = await fetch('/api/app_info');
         if (response.ok) {
             const appInfo = await response.json();
-            
-            // Update footer information
-            document.getElementById('app-name').textContent = appInfo.name;
-            document.getElementById('app-version').textContent = `v${appInfo.version}`;
-            document.getElementById('app-author').textContent = appInfo.author;
-            
-            const contactElement = document.getElementById('app-contact');
-            contactElement.textContent = appInfo.contact;
-            contactElement.href = `mailto:${appInfo.contact}`;
-            
-            const websiteElement = document.getElementById('app-website');
-            websiteElement.textContent = appInfo.website.replace('https://', '').replace('http://', '');
-            websiteElement.href = appInfo.website;
+            // Footer 元素已移除，此函数保留为空壳以避免破坏其他调用方
         }
     } catch (error) {
         // console.error('Failed to load application information:', error);
@@ -3774,6 +3995,67 @@ async function loadAppInfo() {
 }
 
 // ==================== 连接事件日志功能 ====================
+
+// 排序状态（每次进入页面由 getConnectionEventsContent 重置为默认）
+let connectionEventsSort = { by: 'event_time', order: 'DESC' };
+// 每页条数（每次进入页面由 getConnectionEventsContent 重置为 100）
+let connectionEventsPageSize = 100;
+// 各字段的默认排序方向
+const CONNECTION_EVENTS_DEFAULT_ORDER = {
+    event_time: 'DESC',
+    event_type: 'ASC',
+    mount_name: 'ASC',
+    username: 'ASC',
+    ip_address: 'ASC',
+};
+// 每页条数可选值
+const CONNECTION_EVENTS_PAGE_SIZE_OPTIONS = [50, 100, 200, 500];
+
+function getConnectionEventsContent() {
+    // 每次进入页面，重置排序状态和每页条数
+    connectionEventsSort = { by: 'event_time', order: 'DESC' };
+    connectionEventsPageSize = 100;
+    const pageSizeOptions = CONNECTION_EVENTS_PAGE_SIZE_OPTIONS
+        .map(n => `<option value="${n}" ${n === 100 ? 'selected' : ''}>${n} 条/页</option>`)
+        .join('');
+    return `
+        <div class="page-header">
+            <h3>连接事件日志</h3>
+            <p class="page-subtitle">基站（上传端）和移动站（用户连接/下载端）的上下线记录</p>
+        </div>
+        <div class="settings-container" style="max-width: 100%; margin: 0 auto;">
+            <div class="settings-section">
+                <div class="form-group" style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 0;">
+                    <select id="connection-event-filter" class="form-control" style="width: auto; min-width: 120px;">
+                        <option value="">全部事件</option>
+                        <option value="base_station_online">基站上线</option>
+                        <option value="base_station_offline">基站下线</option>
+                        <option value="mount_online">移动站上线</option>
+                        <option value="mount_offline">移动站下线</option>
+                    </select>
+                    <input type="text" id="connection-event-mount" placeholder="挂载点名称" class="form-control" style="width: auto; min-width: 120px;">
+                    <input type="text" id="connection-event-user" placeholder="用户名" class="form-control" style="width: auto; min-width: 120px;">
+                    <input type="datetime-local" id="connection-event-start" class="form-control" style="width: auto; min-width: 160px;">
+                    <input type="datetime-local" id="connection-event-end" class="form-control" style="width: auto; min-width: 160px;">
+                    <button onclick="loadConnectionEvents(0, connectionEventsPageSize)" class="btn btn-primary">查询</button>
+                    <select id="connection-events-page-size" class="form-control" style="width: auto; min-width: 110px;" onchange="changeConnectionEventsPageSize(this.value)">
+                        ${pageSizeOptions}
+                    </select>
+                </div>
+            </div>
+            <div id="connection-events-list">
+                <p class="loading-text">正在加载事件日志...</p>
+            </div>
+        </div>
+    `;
+}
+
+function changeConnectionEventsPageSize(newSize) {
+    const n = parseInt(newSize, 10);
+    if (!Number.isFinite(n) || n <= 0) return;
+    connectionEventsPageSize = n;
+    loadConnectionEvents(0, n);
+}
 
 async function loadConnectionEvents(offset = 0, limit = 100) {
     try {
@@ -3793,10 +4075,14 @@ async function loadConnectionEvents(offset = 0, limit = 100) {
         if (endTime) params.append('end_time', endTime);
         params.append('limit', String(limit));
         params.append('offset', String(offset));
+        params.append('sort_by', connectionEventsSort.by);
+        params.append('sort_order', connectionEventsSort.order);
 
         const response = await fetch('/api/connection_events?' + params.toString());
         const result = await handleApiResponse(response);
         if (result.success) {
+            if (result.sort_by) connectionEventsSort.by = result.sort_by;
+            if (result.sort_order) connectionEventsSort.order = result.sort_order;
             renderConnectionEvents(result.events || [], result.statistics || {}, {
                 offset: result.offset,
                 limit: result.limit,
@@ -3810,6 +4096,24 @@ async function loadConnectionEvents(offset = 0, limit = 100) {
             showAlert('加载连接事件日志失败：' + error.message, 'error');
         }
     }
+}
+
+// 点击列头：相同列切换方向，不同列使用该字段默认方向
+function sortConnectionEvents(column) {
+    if (connectionEventsSort.by === column) {
+        connectionEventsSort.order = connectionEventsSort.order === 'ASC' ? 'DESC' : 'ASC';
+    } else {
+        connectionEventsSort.by = column;
+        connectionEventsSort.order = CONNECTION_EVENTS_DEFAULT_ORDER[column] || 'ASC';
+    }
+    loadConnectionEvents(0, 100);
+}
+
+// 生成排序方向指示器（连接事件）
+function sortIndicatorConnectionEvents(column) {
+    if (connectionEventsSort.by !== column) return '<span style="color: #adb5bd; font-size: 0.85em;">⇅</span>';
+    const arrow = connectionEventsSort.order === 'ASC' ? '↑' : '↓';
+    return `<span style="color: #007bff; font-weight: bold;">${arrow}</span>`;
 }
 
 function renderConnectionEvents(events, statistics, pagination = null) {
@@ -3841,16 +4145,27 @@ function renderConnectionEvents(events, statistics, pagination = null) {
         const totalPages = Math.max(1, Math.ceil(total / limit));
         const hasPrev = offset > 0;
         const hasNext = offset + events.length < total;
+        const firstOffset = 0;
+        const lastOffset = Math.max(0, (totalPages - 1) * limit);
         const startRange = total > 0 ? offset + 1 : 0;
         const endRange = offset + events.length;
 
         paginationHtml = `
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 0.85em; color: #6c757d;">
                 <div>显示第 ${startRange} - ${endRange} 条，共 ${total} 条</div>
-                <div style="display: flex; gap: 5px; align-items: center;">
-                    <button class="btn btn-secondary btn-sm" ${!hasPrev ? 'disabled' : ''} onclick="loadConnectionEvents(${offset - limit}, ${limit})">上一页</button>
-                    <span>第 ${currentPage} / ${totalPages} 页</span>
-                    <button class="btn btn-secondary btn-sm" ${!hasNext ? 'disabled' : ''} onclick="loadConnectionEvents(${offset + limit}, ${limit})">下一页</button>
+                <div style="display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
+                    <button class="btn btn-secondary btn-sm" ${!hasPrev ? 'disabled' : ''} onclick="loadConnectionEvents(${firstOffset}, ${limit})" title="首页">« 首页</button>
+                    <button class="btn btn-secondary btn-sm" ${!hasPrev ? 'disabled' : ''} onclick="loadConnectionEvents(${offset - limit}, ${limit})" title="上一页">上一页</button>
+                    <span style="display: inline-flex; align-items: center; gap: 4px;">
+                        第
+                        <input type="number" id="connection-events-page-input" min="1" max="${totalPages}" value="${currentPage}"
+                               style="width: 60px; padding: 2px 6px; font-size: 0.95em; text-align: center; border: 1px solid #ced4da; border-radius: 3px;"
+                               onkeydown="if(event.key === 'Enter'){ event.preventDefault(); jumpConnectionEventsPage(${limit}); }" />
+                        / ${totalPages} 页
+                    </span>
+                    <button class="btn btn-primary btn-sm" onclick="jumpConnectionEventsPage(${limit})" title="跳转到指定页">跳转</button>
+                    <button class="btn btn-secondary btn-sm" ${!hasNext ? 'disabled' : ''} onclick="loadConnectionEvents(${offset + limit}, ${limit})" title="下一页">下一页</button>
+                    <button class="btn btn-secondary btn-sm" ${!hasNext ? 'disabled' : ''} onclick="loadConnectionEvents(${lastOffset}, ${limit})" title="尾页">尾页 »</button>
                 </div>
             </div>
         `;
@@ -3888,15 +4203,15 @@ function renderConnectionEvents(events, statistics, pagination = null) {
 
     const html = `
         <div style="margin-bottom: 10px;">${statItems || '<span style="font-size: 0.85em; color: #6c757d;">暂无统计</span>'}</div>
-        <div class="table-container" style="max-height: 500px; overflow-y: auto;">
+        <div class="table-container" style="max-height: 800px; overflow-y: auto;">
             <table class="data-table" style="min-width: 600px;">
-                <thead>
+                <thead style="position: sticky; top: 0; z-index: 1; background: #f8f9fa;">
                     <tr>
-                        <th>事件类型</th>
-                        <th>挂载点</th>
-                        <th>用户名</th>
-                        <th>IP 地址</th>
-                        <th>时间</th>
+                        <th style="cursor: pointer; user-select: none;" onclick="sortConnectionEvents('event_type')" title="点击按事件类型排序">事件类型 ${sortIndicatorConnectionEvents('event_type')}</th>
+                        <th style="cursor: pointer; user-select: none;" onclick="sortConnectionEvents('mount_name')" title="点击按挂载点排序">挂载点 ${sortIndicatorConnectionEvents('mount_name')}</th>
+                        <th style="cursor: pointer; user-select: none;" onclick="sortConnectionEvents('username')" title="点击按用户名排序">用户名 ${sortIndicatorConnectionEvents('username')}</th>
+                        <th style="cursor: pointer; user-select: none;" onclick="sortConnectionEvents('ip_address')" title="点击按 IP 地址排序">IP 地址 ${sortIndicatorConnectionEvents('ip_address')}</th>
+                        <th style="cursor: pointer; user-select: none;" onclick="sortConnectionEvents('event_time')" title="点击按时间排序">时间 ${sortIndicatorConnectionEvents('event_time')}</th>
                         <th>持续时长</th>
                         <th>原因</th>
                     </tr>
@@ -3910,6 +4225,23 @@ function renderConnectionEvents(events, statistics, pagination = null) {
     `;
 
     container.innerHTML = html;
+}
+
+function jumpConnectionEventsPage(limit = 100) {
+    const input = document.getElementById('connection-events-page-input');
+    if (!input) return;
+    let page = parseInt(input.value, 10);
+    if (!Number.isFinite(page) || page < 1) {
+        page = 1;
+        input.value = 1;
+    }
+    const maxPage = parseInt(input.max, 10);
+    if (Number.isFinite(maxPage) && maxPage > 0 && page > maxPage) {
+        page = maxPage;
+        input.value = maxPage;
+    }
+    const offset = (page - 1) * limit;
+    loadConnectionEvents(offset, limit);
 }
 
 

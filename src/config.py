@@ -163,6 +163,10 @@ DB_POOL_SIZE = get_config_value('database', 'pool_size', 10, int)
 DB_TIMEOUT = get_config_value('database', 'timeout', 30, int)
 DB_RETENTION_DAYS = get_config_value('database', 'retention_days', 365, int)  # 连接事件日志保留天数，默认1年
 
+# 移动站 GGA 数据保留条数：mobile_station_data 表最多保留的记录数，超出后按 id 升序删除最旧记录
+# 设为 0 或负数表示禁用（不自动清理）
+MOBILE_DATA_MAX_RECORDS = get_config_value('database', 'mobile_data_max_records', 100000, int)
+
 # ==================== 日志配置 ====================
 
 LOG_DIR = get_config_value('logging', 'log_dir', 'logs')

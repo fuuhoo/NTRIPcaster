@@ -6,6 +6,7 @@ web.py - Web管理模块
 
 import time
 import json
+import queue
 import logging
 import psutil
 import re
@@ -25,6 +26,7 @@ from . import logger
 from .logger import log_debug, log_info, log_warning, log_error, log_critical, log_web_request, log_system_event
 from . import connection
 from . import forwarder
+from . import notification
 from .rtcm2_manager import parser_manager as rtcm_manager
 
 # 全局服务器实例引用
@@ -83,7 +85,11 @@ class WebManager:
         # 实时数据推送线程
         self.push_thread = None
         self.push_running = False
-        
+
+        # 日志推送队列（非阻塞式日志推送，避免在数据面线程上同步socketio广播）
+        self.log_push_queue = None
+        self.log_push_thread = None
+
         # 设置logger的web实例引用，用于实时日志推送
         logger.set_web_instance(self)
     
@@ -157,7 +163,7 @@ class WebManager:
         def classic_index():
             """经典主页 - 系统状态和挂载点信息"""
             # 获取系统信息
-            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_percent = psutil.cpu_percent(interval=None)  # 非阻塞获取CPU占用
             memory = psutil.virtual_memory()
             uptime = time.time() - self.start_time
             
@@ -215,7 +221,7 @@ class WebManager:
                     
                     # 检查重定向参数
                     redirect_page = request.args.get('redirect')
-                    if redirect_page and redirect_page in ['users', 'mounts', 'settings']:
+                    if redirect_page and redirect_page in ['dashboard', 'users', 'mounts', 'connection_events', 'settings', 'data_view']:
                         return redirect(f'/?page={redirect_page}')
                     
                     return redirect(url_for('index'))
@@ -273,6 +279,13 @@ class WebManager:
                     return jsonify({'error': '登录失败'}), 500
 
         
+        @self.app.route('/api/auth/check')
+        def api_auth_check():
+            """轻量登录状态检查（不触发重活，供前端页面鉴权使用）"""
+            if session.get('admin_logged_in'):
+                return jsonify({'authenticated': True})
+            return jsonify({'authenticated': False}), 401
+
         @self.app.route('/api/mount_info/<mount>')
         @self.require_login
         def mount_info(mount):
@@ -348,6 +361,7 @@ class WebManager:
                 
                 success, message = self.db_manager.add_notification_bot(name, platform, webhook_url, secret, enabled, events)
                 if success:
+                    notification.invalidate_notification_bots_cache()
                     log_system_event(f"消息机器人配置已添加: {name} ({platform})")
                     return jsonify({'success': True, 'message': message}), 201
                 else:
@@ -384,6 +398,7 @@ class WebManager:
                     
                     success, message = self.db_manager.update_notification_bot(bot_id, name, platform, webhook_url, secret, enabled, events)
                     if success:
+                        notification.invalidate_notification_bots_cache()
                         log_system_event(f"消息机器人配置已更新: {name} (ID: {bot_id})")
                         return jsonify({'success': True, 'message': message})
                     else:
@@ -396,6 +411,7 @@ class WebManager:
                 try:
                     success, message = self.db_manager.delete_notification_bot(bot_id)
                     if success:
+                        notification.invalidate_notification_bots_cache()
                         log_system_event(f"消息机器人配置已删除 (ID: {bot_id})")
                         return jsonify({'success': True, 'message': message})
                     else:
@@ -607,13 +623,15 @@ class WebManager:
                         log_warning("推送数据缺少mount_name字段")
                         return
                         
-                    # 通过SocketIO推送给前端，事件名为'rtcm_realtime_data'
+                    # 通过SocketIO推送数据给RTCM视图客户端（仅发送给订阅该视图的房间，避免全量广播）
+                    # 事件名为'rtcm_realtime_data'
                     if data_type != 'msm_satellite':
                         # print(f"[后端推送] 通过SocketIO推送数据到前端 - 事件: rtcm_realtime_data")
                         pass
                     self.socketio.emit(
                         'rtcm_realtime_data',
-                        parsed_data
+                        parsed_data,
+                        to='rtcm_view'
                     )
                     if data_type != 'msm_satellite':
                         # print(f"[后端推送] 数据推送完成\n")
@@ -721,36 +739,13 @@ class WebManager:
                 try:
                     mount_filter = request.args.get('mount_name', '').strip()
                     username_filter = request.args.get('username', '').strip()
-                    
-                    # 获取所有连接，然后在后端进行模糊筛选
-                    connections = connection.get_connection_manager().get_all_user_connections()
-                    
-                    # 模糊筛选挂载点
-                    if mount_filter:
-                        connections = [c for c in connections if mount_filter.lower() in c.get('mount_name', '').lower()]
-                    
-                    # 模糊筛选用户名
-                    if username_filter:
-                        connections = [c for c in connections if username_filter.lower() in c.get('username', '').lower()]
-                    
-                    # 为每个连接补充差分状态和数据速率
-                    result = []
-                    for conn in connections:
-                        connection_id = conn.get('connection_id', '')
-                        username = conn.get('username', '')
-                        is_diffing = connection.get_connection_manager().is_user_connection_diffing(username, connection_id)
-                        data_rate = connection.get_connection_manager().get_user_connection_data_rate(username, connection_id)
-                        result.append({
-                            'connection_id': connection_id,
-                            'username': username,
-                            'mount_name': conn.get('mount_name', ''),
-                            'ip_address': conn.get('ip_address', ''),
-                            'connect_time': conn.get('connect_datetime', '-'),
-                            'bytes_sent': conn.get('bytes_sent', 0),
-                            'data_rate': data_rate,
-                            'is_diffing': is_diffing
-                        })
-                    
+
+                    # 单次遍历一次性计算所有连接字段，避免逐连接重复加锁遍历
+                    result = connection.get_connection_manager().get_all_user_connections_enriched(
+                        mount_filter=mount_filter or None,
+                        username_filter=username_filter or None
+                    )
+
                     return jsonify(result)
                 except Exception as e:
                     log_error(f"获取移动站连接列表失败: {e}")
@@ -1360,17 +1355,19 @@ class WebManager:
                 limit = request.args.get('limit', 100, type=int)
                 if limit < 1 or limit > 1000:
                     limit = 100
-                
+
                 offset = request.args.get('offset', 0, type=int)
                 if offset < 0:
                     offset = 0
-                
+
                 event_type = request.args.get('event_type') or None
                 mount_name = request.args.get('mount_name') or None
                 username = request.args.get('username') or None
                 start_time = request.args.get('start_time') or None
                 end_time = request.args.get('end_time') or None
-                
+                sort_by = request.args.get('sort_by') or 'event_time'
+                sort_order = request.args.get('sort_order') or 'DESC'
+
                 events = self.db_manager.get_connection_events(
                     limit=limit,
                     offset=offset,
@@ -1378,32 +1375,97 @@ class WebManager:
                     mount_name=mount_name,
                     username=username,
                     start_time=start_time,
-                    end_time=end_time
+                    end_time=end_time,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
                 )
-                
+
                 total = self.db_manager.get_connection_events_count(
                     event_type=event_type,
                     mount_name=mount_name,
                     username=username,
                     start_time=start_time,
-                    end_time=end_time
+                    end_time=end_time,
                 )
-                
+
                 stats = self.db_manager.get_connection_events_statistics(start_time, end_time)
-                
+
+                # 后端白名单校验后的实际排序值（防止非法值原样回显）
+                from .database import CONNECTION_EVENTS_SORT_FIELDS
+                actual_sort_by = sort_by if sort_by in CONNECTION_EVENTS_SORT_FIELDS else 'event_time'
+                actual_sort_order = 'DESC' if str(sort_order).upper() != 'ASC' else 'ASC'
+
                 return jsonify({
                     'success': True,
                     'events': events,
                     'statistics': stats,
                     'total': total,
                     'limit': limit,
-                    'offset': offset
+                    'offset': offset,
+                    'sort_by': actual_sort_by,
+                    'sort_order': actual_sort_order,
                 })
             except Exception as e:
                 log_error(f"获取连接事件日志失败: {e}")
                 return jsonify({'error': str(e)}), 500
 
-    
+        @self.app.route('/api/mobile_data', methods=['GET'])
+        @self.require_login
+        def api_mobile_data():
+            """获取移动站 GGA 数据列表（数据查看页面）"""
+            try:
+                limit = request.args.get('limit', 100, type=int)
+                if limit < 1 or limit > 1000:
+                    limit = 100
+
+                offset = request.args.get('offset', 0, type=int)
+                if offset < 0:
+                    offset = 0
+
+                username = request.args.get('username') or None
+                mount_name = request.args.get('mount_name') or None
+                start_time = request.args.get('start_time') or None
+                end_time = request.args.get('end_time') or None
+                sort_by = request.args.get('sort_by') or 'event_time'
+                sort_order = request.args.get('sort_order') or 'DESC'
+
+                rows = self.db_manager.get_mobile_data(
+                    limit=limit,
+                    offset=offset,
+                    username=username,
+                    mount_name=mount_name,
+                    start_time=start_time,
+                    end_time=end_time,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                )
+                total = self.db_manager.get_mobile_data_count(
+                    username=username,
+                    mount_name=mount_name,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+
+                # 后端白名单校验后的实际排序值
+                from .database import MOBILE_DATA_SORT_FIELDS
+                actual_sort_by = sort_by if sort_by in MOBILE_DATA_SORT_FIELDS else 'event_time'
+                actual_sort_order = 'DESC' if str(sort_order).upper() != 'ASC' else 'ASC'
+
+                return jsonify({
+                    'success': True,
+                    'data': rows,
+                    'total': total,
+                    'limit': limit,
+                    'offset': offset,
+                    'max_records': config.MOBILE_DATA_MAX_RECORDS,
+                    'sort_by': actual_sort_by,
+                    'sort_order': actual_sort_order,
+                })
+            except Exception as e:
+                log_error(f"获取移动站 GGA 数据失败: {e}")
+                return jsonify({'error': str(e)}), 500
+
+
     def _ensure_forwarder_started(self):
         """确保forwarder已启动（已在main.py中启动，此方法保留用于兼容性）"""
         # forwarder已经在main.py中启动，这里不需要重复启动
@@ -1468,6 +1530,17 @@ class WebManager:
                     'data': recent_data
                 })
         
+        @self.socketio.on('join_rtcm_room')
+        def handle_join_rtcm_room(data):
+            """加入RTCM实时视图房间：仅订阅的客户端接收rtcm_realtime_data"""
+            try:
+                leave_room('rtcm_view')
+                join_room('rtcm_view')
+                mount = data.get('mount') if isinstance(data, dict) else None
+                log_debug(f"客户端加入RTCM视图房间 [挂载点: {mount}]")
+            except Exception as e:
+                log_error(f"加入RTCM视图房间失败: {e}")
+
         @self.socketio.on('request_system_stats')
         def handle_request_system_stats():
             """请求系统统计数据"""
@@ -1504,7 +1577,13 @@ class WebManager:
     def start_rtcm_parsing(self):
         """启动RTCM解析进程，持续解析数据并推送到前端"""
         # 现在RTCM解析集成在connection_manager中，无需单独启动
-        
+
+        # 启动日志推送工作线程（非阻塞，避免占用数据面线程）
+        if self.log_push_queue is None:
+            self.log_push_queue = queue.Queue(maxsize=2000)
+            self.log_push_thread = Thread(target=self._log_push_worker, daemon=True)
+            self.log_push_thread.start()
+
         # 启动实时数据推送
         if not self.push_running:
             self.push_running = True
@@ -1515,7 +1594,16 @@ class WebManager:
     def stop_rtcm_parsing(self):
         """停止RTCM解析"""
         # 现在RTCM解析集成在connection_manager中，无需单独停止
-        
+
+        # 停止日志推送工作线程
+        if self.log_push_queue is not None:
+            try:
+                self.log_push_queue.put(None, timeout=1)
+            except queue.Full:
+                pass
+            if self.log_push_thread:
+                self.log_push_thread.join(timeout=2)
+
         # 停止实时数据推送
         if self.push_running:
             self.push_running = False
@@ -1523,6 +1611,39 @@ class WebManager:
                 self.push_thread.join(timeout=5)
             log_system_event('Web实时数据推送已停止')
     
+    def _log_push_worker(self):
+        """日志推送工作线程：从队列取日志并异步广播"""
+        while True:
+            try:
+                item = self.log_push_queue.get()
+            except Exception:
+                break
+            if item is None:
+                break
+            message, log_type, timestamp = item
+            try:
+                self.socketio.emit('log_message', {
+                    'message': message,
+                    'type': log_type,
+                    'timestamp': timestamp
+                }, to='data_push')
+            except Exception:
+                pass
+
+    def push_log_message(self, message, log_type='info'):
+        """推送日志消息到前端（非阻塞：入队后由独立工作线程广播）"""
+        if self.log_push_queue is None:
+            return
+        try:
+            self.log_push_queue.put_nowait((message, log_type, time.time()))
+        except queue.Full:
+            # 队列已满时丢弃最旧的日志，避免日志积压拖慢系统
+            try:
+                self.log_push_queue.get_nowait()
+                self.log_push_queue.put_nowait((message, log_type, time.time()))
+            except Exception:
+                pass
+
     def _push_data_loop(self):
         """实时数据推送循环"""
         log_info("数据推送循环已启动")
@@ -1537,68 +1658,48 @@ class WebManager:
                             'stats': stats,
                             'timestamp': time.time()
                         }, to='data_push')
-                        # 移除调试日志输出
-                pass
-                
-                # 推送在线用户列表
-                online_users = connection.get_connection_manager().get_online_users()
+
+                # 推送在线用户列表（安全副本，剥离开client_socket避免序列化失败）
+                online_users = connection.get_connection_manager().get_online_users_api()
                 self.socketio.emit('online_users_update', {
                     'users': online_users,
                     'timestamp': time.time()
                 }, to='data_push')
-                # 移除调试日志输出
-                pass
-                
+
                 # 推送在线挂载点列表
                 online_mounts = connection.get_connection_manager().get_online_mounts()
                 self.socketio.emit('online_mounts_update', {
                     'mounts': online_mounts,
                     'timestamp': time.time()
                 }, to='data_push')
-                # 移除调试日志输出
-                pass
-                
+
                 # 推送STR表数据
                 str_data = connection.get_connection_manager().get_all_str_data()
                 self.socketio.emit('str_data_update', {
                     'str_data': str_data,
                     'timestamp': time.time()
                 }, to='data_push')
-                # 移除调试日志输出
-                pass
-                
+
                 time.sleep(config.REALTIME_PUSH_INTERVAL)
             except Exception as e:
-                log_error(f"数据推送异常: {e}", exc_info=True)
+                # 推送异常不记录exc_info堆栈，避免每周期刷屏
+                log_error(f"数据推送异常: {e}")
                 time.sleep(1)
-    
-    def push_log_message(self, message, log_type='info'):
-        """推送日志消息到前端"""
-        try:
-            self.socketio.emit('log_message', {
-                'message': message,
-                'type': log_type,
-                'timestamp': time.time()
-            }, to='data_push')
-        except Exception as e:
-            log_error(f"推送日志消息失败: {e}")
-    
+
     def _format_uptime(self, uptime_seconds):
         """格式化运行时间"""
         days = int(uptime_seconds // 86400)
         hours = int((uptime_seconds % 86400) // 3600)
         minutes = int((uptime_seconds % 3600) // 60)
         seconds = int(uptime_seconds % 60)
-        
+
         if days > 0:
             return f"{days}天 {hours}小时 {minutes}分钟"
         elif hours > 0:
             return f"{hours}小时 {minutes}分钟"
         else:
             return f"{minutes}分钟 {seconds}秒"
-    
 
-    
     def run(self, host=None, port=None, debug=None):
         """启动Web服务器"""
         host = host or config.HOST

@@ -30,6 +30,10 @@ remember_me_duration = 2592000
 type = sqlite
 path = /app/data/2rtk.db
 
+# 移动站 GGA 数据保留配置
+# mobile_station_data 表最多保留的条数，超出后按 id 升序删除最旧记录
+mobile_data_max_records = 100000
+
 # 连接池配置（仅适用于 PostgreSQL/MySQL）
 # host = localhost
 # port = 5432

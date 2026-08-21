@@ -4,12 +4,36 @@ import sqlite3
 import hashlib
 import secrets
 import logging
+import threading
 from threading import Lock
 from . import config
 from . import logger
 from .logger import log_debug, log_info, log_warning, log_error, log_critical, log_database_operation, log_authentication
 
 db_lock = Lock()
+
+# 全局SQLite连接：单连接复用 + WAL模式，避免每次操作都open/close连接的开销
+_db_conn = None
+_db_conn_lock = threading.Lock()
+
+
+def _get_conn():
+    """获取全局SQLite连接（单连接复用，开启WAL与busy_timeout）"""
+    global _db_conn
+    if _db_conn is None:
+        with _db_conn_lock:
+            if _db_conn is None:
+                conn = sqlite3.connect(config.DATABASE_PATH, check_same_thread=False)
+                # 自动提交模式，避免异常残留未提交事务污染后续操作
+                conn.isolation_level = None
+                try:
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    conn.execute('PRAGMA busy_timeout=10000')
+                    conn.execute('PRAGMA foreign_keys=ON')
+                except Exception:
+                    pass
+                _db_conn = conn
+    return _db_conn
 
 
 def hash_password(password, salt=None):
@@ -36,7 +60,7 @@ def verify_password(stored_password, provided_password):
 def init_db():
     """初始化SQLite数据库表结构"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
 
         # 管理员表
@@ -116,6 +140,25 @@ def init_db():
         c.execute('CREATE INDEX IF NOT EXISTS idx_connection_events_mount_name ON connection_events(mount_name)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_connection_events_username ON connection_events(username)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_connection_events_event_time ON connection_events(event_time)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_connection_events_ip_address ON connection_events(ip_address)')
+
+        # 移动站 GGA 数据表（移动站发送给 caster 的反向 NMEA 数据）
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS mobile_station_data (
+            id INTEGER PRIMARY KEY,
+            event_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            username TEXT,
+            mount_name TEXT,
+            ip_address TEXT,
+            nmea_type TEXT,
+            raw_data TEXT NOT NULL,
+            data_size INTEGER
+        )
+        ''')
+        # 主键 id 自增，单调递增，按 id 升序删除即等价于按时间删除（且更快）
+        c.execute('CREATE INDEX IF NOT EXISTS idx_msd_event_time ON mobile_station_data(event_time)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_msd_username   ON mobile_station_data(username)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_msd_mount_name ON mobile_station_data(mount_name)')
         
         c.execute("SELECT * FROM admins")
         if not c.fetchone():
@@ -134,7 +177,6 @@ def init_db():
             log_info('数据库迁移：为notification_bots表添加secret字段')
         
         conn.commit()
-        conn.close()
         log_info('数据库初始化完成')
 
 def verify_mount_and_user(mount, username=None, password=None, mount_password=None, protocol_version="1.0"):
@@ -147,7 +189,7 @@ def verify_mount_and_user(mount, username=None, password=None, mount_password=No
         mount_password: 挂载点密码（可选）
     """
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         
         try:
@@ -210,14 +252,14 @@ def verify_mount_and_user(mount, username=None, password=None, mount_password=No
             log_error(f"用户认证异常: {e}", exc_info=True)
             return False, f"认证异常: {e}"
         finally:
-            conn.close()
+            pass
 
 
 
 def add_user(username, password):
     """添加新用户到数据库"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             # 检查用户是否已存在
@@ -235,12 +277,12 @@ def add_user(username, password):
             log_database_operation('add_user', 'users', False, str(e))
             return False, f"添加用户失败: {e}"
         finally:
-            conn.close()
+            pass
 
 def update_user(user_id, username, password):
     """更新用户信息"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             # 检查用户名是否与其他用户冲突
@@ -264,14 +306,14 @@ def update_user(user_id, username, password):
             log_database_operation('update_user', 'users', False, str(e))
             return False, f"更新用户失败: {e}"
         finally:
-            conn.close()
+            pass
 
 # ==================== 消息机器人配置管理 ====================
 
 def get_all_notification_bots():
     """获取所有消息机器人配置，包含订阅事件类型"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             c.execute('''
@@ -302,13 +344,13 @@ def get_all_notification_bots():
                 })
             return result
         finally:
-            conn.close()
+            pass
 
 
 def get_notification_bots():
     """获取所有启用的消息机器人配置，包含订阅事件类型"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             c.execute('''
@@ -339,7 +381,7 @@ def get_notification_bots():
                 })
             return result
         finally:
-            conn.close()
+            pass
 
 
 def add_notification_bot(name, platform, webhook_url, secret, enabled, events):
@@ -353,7 +395,7 @@ def add_notification_bot(name, platform, webhook_url, secret, enabled, events):
         events: 订阅事件类型列表，如 ['mount_online', 'mount_offline']
     """
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             if platform not in ('dingtalk', 'wecom'):
@@ -389,13 +431,13 @@ def add_notification_bot(name, platform, webhook_url, secret, enabled, events):
             log_database_operation('add_notification_bot', 'notification_bots', False, str(e))
             return False, f"添加机器人失败: {e}"
         finally:
-            conn.close()
+            pass
 
 
 def update_notification_bot(bot_id, name, platform, webhook_url, secret, enabled, events):
     """更新消息机器人配置"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             c.execute('SELECT id FROM notification_bots WHERE id = ?', (bot_id,))
@@ -437,13 +479,13 @@ def update_notification_bot(bot_id, name, platform, webhook_url, secret, enabled
             log_database_operation('update_notification_bot', 'notification_bots', False, str(e))
             return False, f"更新机器人失败: {e}"
         finally:
-            conn.close()
+            pass
 
 
 def delete_notification_bot(bot_id):
     """删除消息机器人配置"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             c.execute('SELECT name FROM notification_bots WHERE id = ?', (bot_id,))
@@ -460,13 +502,13 @@ def delete_notification_bot(bot_id):
             log_database_operation('delete_notification_bot', 'notification_bots', False, str(e))
             return False, f"删除机器人失败: {e}"
         finally:
-            conn.close()
+            pass
 
 
 def delete_user(user_id):
     """删除用户"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             
@@ -495,23 +537,23 @@ def delete_user(user_id):
             log_database_operation('delete_user', 'users', False, str(e))
             return False, f"删除用户失败: {e}"
         finally:
-            conn.close()
+            pass
 
 def get_all_users():
     """获取所有用户列表"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             c.execute("SELECT id, username, password FROM users")
             return c.fetchall()
         finally:
-            conn.close()
+            pass
 
 def update_user_password(username, new_password):
     """更新用户密码"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             
@@ -531,12 +573,12 @@ def update_user_password(username, new_password):
             log_error(f"更新用户密码失败: {e}")
             return False, f"更新密码失败: {e}"
         finally:
-            conn.close()
+            pass
 
 def add_mount(mount, password, user_id=None):
     """添加新挂载点"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
            
@@ -558,12 +600,12 @@ def add_mount(mount, password, user_id=None):
             log_database_operation('add_mount', 'mounts', False, str(e))
             return False, f"添加挂载点失败: {e}"
         finally:
-            conn.close()
+            pass
 
 def update_mount(mount_id, mount=None, password=None, user_id=None):
     """更新挂载点信息"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             
@@ -598,12 +640,12 @@ def update_mount(mount_id, mount=None, password=None, user_id=None):
             log_database_operation('update_mount', 'mounts', False, str(e))
             return False, f"更新挂载点失败: {e}"
         finally:
-            conn.close()
+            pass
 
 def delete_mount(mount_id):
     """删除挂载点"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             
@@ -621,12 +663,12 @@ def delete_mount(mount_id):
             logger.log_database_operation('delete_mount', 'mounts', False, str(e))
             return False, f"删除挂载点失败: {e}"
         finally:
-            conn.close()
+            pass
 
 def get_all_mounts():
     """获取所有挂载点列表"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             c.execute("PRAGMA table_info(mounts)")
@@ -642,14 +684,14 @@ def get_all_mounts():
                              LEFT JOIN users u ON m.user_id = u.id""")
             return c.fetchall()
         finally:
-            conn.close()
+            pass
 
 
 
 def get_mount_owner(mount_name):
     """获取挂载点所属用户"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             c.execute('''
@@ -663,12 +705,12 @@ def get_mount_owner(mount_name):
         except Exception:
             return '未知'
         finally:
-            conn.close()
+            pass
 
 def verify_admin(username, password):
     """验证管理员账号密码"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             c.execute("SELECT password FROM admins WHERE username = ?", (username,))
@@ -677,12 +719,12 @@ def verify_admin(username, password):
                 return True
             return False
         finally:
-            conn.close()
+            pass
 
 def update_admin_password(username, new_password):
     """更新管理员密码"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             hashed_password = hash_password(new_password)
@@ -694,7 +736,7 @@ def update_admin_password(username, new_password):
             log_database_operation('update_admin_password', 'admins', False, str(e))
             return False
         finally:
-            conn.close()
+            pass
 
 
 # ==================== 连接事件日志管理 ====================
@@ -713,7 +755,7 @@ def add_connection_event(event_type, mount_name=None, username=None, ip_address=
         details: 额外详情（JSON 字符串等）
     """
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             c.execute('''
@@ -727,13 +769,13 @@ def add_connection_event(event_type, mount_name=None, username=None, ip_address=
             log_error(f'记录连接事件失败: {e}', exc_info=True)
             return False, str(e)
         finally:
-            conn.close()
+            pass
 
 
 def get_connection_events_count(event_type=None, mount_name=None, username=None, start_time=None, end_time=None):
     """获取连接事件日志总数（用于分页）"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             query = 'SELECT COUNT(*) FROM connection_events WHERE 1=1'
@@ -756,7 +798,7 @@ def get_connection_events_count(event_type=None, mount_name=None, username=None,
             c.execute(query, params)
             return c.fetchone()[0]
         finally:
-            conn.close()
+            pass
 
 
 def cleanup_old_connection_events(retention_days=365, max_records=100000):
@@ -775,7 +817,7 @@ def cleanup_old_connection_events(retention_days=365, max_records=100000):
         return 0
     
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         total_deleted = 0
         try:
@@ -816,12 +858,18 @@ def cleanup_old_connection_events(retention_days=365, max_records=100000):
             log_database_operation('cleanup_old_connection_events', 'connection_events', False, str(e))
             return 0
         finally:
-            conn.close()
+            pass
 
 
-def get_connection_events(limit=100, offset=0, event_type=None, mount_name=None, username=None, start_time=None, end_time=None):
+# 连接事件日志允许排序的字段（白名单防 SQL 注入）
+CONNECTION_EVENTS_SORT_FIELDS = {
+    'event_time', 'event_type', 'mount_name', 'username', 'ip_address'
+}
+
+
+def get_connection_events(limit=100, offset=0, event_type=None, mount_name=None, username=None, start_time=None, end_time=None, sort_by='event_time', sort_order='DESC'):
     """获取连接事件日志列表
-    
+
     Args:
         limit: 返回最大条数
         offset: 偏移量，用于分页
@@ -830,9 +878,16 @@ def get_connection_events(limit=100, offset=0, event_type=None, mount_name=None,
         username: 按用户名筛选
         start_time: 开始时间（格式 'YYYY-MM-DD HH:MM:SS'）
         end_time: 结束时间（格式 'YYYY-MM-DD HH:MM:SS'）
+        sort_by: 排序字段，必须在 CONNECTION_EVENTS_SORT_FIELDS 白名单内
+        sort_order: 排序方向，'ASC' 或 'DESC'
     """
+    # 白名单校验
+    if sort_by not in CONNECTION_EVENTS_SORT_FIELDS:
+        sort_by = 'event_time'
+    sort_order = 'DESC' if str(sort_order).upper() != 'ASC' else 'ASC'
+
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             query = '''
@@ -856,10 +911,11 @@ def get_connection_events(limit=100, offset=0, event_type=None, mount_name=None,
             if end_time:
                 query += ' AND event_time <= ?'
                 params.append(end_time)
-            query += ' ORDER BY event_time DESC LIMIT ? OFFSET ?'
+            # ORDER BY 字段名是白名单常量，order 方向只能是 ASC/DESC，不存在 SQL 注入
+            query += f' ORDER BY {sort_by} {sort_order} LIMIT ? OFFSET ?'
             params.append(limit)
             params.append(offset)
-            
+
             c.execute(query, params)
             rows = c.fetchall()
             
@@ -885,13 +941,13 @@ def get_connection_events(limit=100, offset=0, event_type=None, mount_name=None,
                 })
             return result
         finally:
-            conn.close()
+            pass
 
 
 def get_connection_events_statistics(start_time=None, end_time=None):
     """获取连接事件统计信息"""
     with db_lock:
-        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn = _get_conn()
         c = conn.cursor()
         try:
             query = 'SELECT event_type, COUNT(*) FROM connection_events WHERE 1=1'
@@ -906,7 +962,188 @@ def get_connection_events_statistics(start_time=None, end_time=None):
             c.execute(query, params)
             return {row[0]: row[1] for row in c.fetchall()}
         finally:
-            conn.close()
+            pass
+
+
+# ==================== 移动站 GGA 数据管理 ====================
+
+def add_mobile_data_batch(rows):
+    """批量插入移动站 GGA 数据
+
+    重要：使用显式 BEGIN/COMMIT 把整个 executemany 包裹在一个事务里。
+    连接设置为 autocommit (isolation_level=None)，如果不显式开启事务，
+    executemany 中的每行都会被立即 fsync，导致 200 行批量插入耗时几十毫秒，
+    长持 db_lock 阻塞 Web API 请求、造成页面卡顿。
+
+    Args:
+        rows: 可迭代对象，每个元素为 (event_time, username, mount_name, ip_address, nmea_type, raw_data, data_size)
+              event_time 可为 None（由 DB 默认填充）
+    """
+    if not rows:
+        return 0
+    with db_lock:
+        conn = _get_conn()
+        c = conn.cursor()
+        try:
+            conn.execute('BEGIN')
+            c.executemany('''
+                INSERT INTO mobile_station_data
+                (event_time, username, mount_name, ip_address, nmea_type, raw_data, data_size)
+                VALUES (COALESCE(?, datetime('now', 'localtime')), ?, ?, ?, ?, ?, ?)
+            ''', rows)
+            conn.execute('COMMIT')
+            return c.rowcount
+        except Exception as e:
+            try:
+                conn.execute('ROLLBACK')
+            except Exception:
+                pass
+            log_error(f'批量插入移动站数据失败: {e}', exc_info=True)
+            return 0
+        finally:
+            pass
+
+
+def get_mobile_data_count(username=None, mount_name=None, start_time=None, end_time=None):
+    """获取移动站 GGA 数据总数（用于分页）"""
+    with db_lock:
+        conn = _get_conn()
+        c = conn.cursor()
+        try:
+            query = 'SELECT COUNT(*) FROM mobile_station_data WHERE 1=1'
+            params = []
+            if username:
+                query += ' AND username = ?'
+                params.append(username)
+            if mount_name:
+                query += ' AND mount_name = ?'
+                params.append(mount_name)
+            if start_time:
+                query += ' AND event_time >= ?'
+                params.append(start_time)
+            if end_time:
+                query += ' AND event_time <= ?'
+                params.append(end_time)
+            c.execute(query, params)
+            return c.fetchone()[0]
+        finally:
+            pass
+
+
+# 移动站 GGA 数据允许排序的字段（白名单防 SQL 注入）
+MOBILE_DATA_SORT_FIELDS = {
+    'event_time', 'username', 'mount_name'
+}
+
+
+def get_mobile_data(limit=100, offset=0, username=None, mount_name=None, start_time=None, end_time=None, sort_by='event_time', sort_order='DESC'):
+    """获取移动站 GGA 数据列表
+
+    Args:
+        limit: 返回最大条数
+        offset: 偏移量，用于分页
+        username: 按用户名筛选
+        mount_name: 按挂载点筛选
+        start_time: 开始时间（格式 'YYYY-MM-DD HH:MM:SS'）
+        end_time: 结束时间（格式 'YYYY-MM-DD HH:MM:SS'）
+        sort_by: 排序字段，必须在 MOBILE_DATA_SORT_FIELDS 白名单内
+        sort_order: 排序方向，'ASC' 或 'DESC'
+    """
+    # 白名单校验
+    if sort_by not in MOBILE_DATA_SORT_FIELDS:
+        sort_by = 'event_time'
+    sort_order = 'DESC' if str(sort_order).upper() != 'ASC' else 'ASC'
+
+    with db_lock:
+        conn = _get_conn()
+        c = conn.cursor()
+        try:
+            query = '''
+                SELECT id, event_time, username, mount_name, ip_address, nmea_type, raw_data, data_size
+                FROM mobile_station_data
+                WHERE 1=1
+            '''
+            params = []
+            if username:
+                query += ' AND username = ?'
+                params.append(username)
+            if mount_name:
+                query += ' AND mount_name = ?'
+                params.append(mount_name)
+            if start_time:
+                query += ' AND event_time >= ?'
+                params.append(start_time)
+            if end_time:
+                query += ' AND event_time <= ?'
+                params.append(end_time)
+            # ORDER BY 字段名是白名单常量，order 方向只能是 ASC/DESC，不存在 SQL 注入
+            query += f' ORDER BY {sort_by} {sort_order} LIMIT ? OFFSET ?'
+            params.append(limit)
+            params.append(offset)
+
+            c.execute(query, params)
+            rows = c.fetchall()
+
+            result = []
+            for row in rows:
+                result.append({
+                    'id': row[0],
+                    'event_time': row[1],
+                    'username': row[2],
+                    'mount_name': row[3],
+                    'ip_address': row[4],
+                    'nmea_type': row[5],
+                    'raw_data': row[6],
+                    'data_size': row[7],
+                })
+            return result
+        finally:
+            pass
+
+
+def cleanup_old_mobile_data(max_records=100000):
+    """清理移动站 GGA 数据，按条数上限保留最新记录
+
+    当 mobile_station_data 表总记录数超过 max_records 时，按 id 升序删除最旧的多余记录。
+    id 为 INTEGER PRIMARY KEY 自增，单调递增，等价于按时间顺序裁剪且性能更优。
+
+    Args:
+        max_records: 最大保留条数；<= 0 表示禁用清理
+    """
+    if max_records <= 0:
+        log_info('移动站数据保留条数配置无效或为 0，跳过清理')
+        return 0
+
+    with db_lock:
+        conn = _get_conn()
+        c = conn.cursor()
+        try:
+            c.execute('SELECT COUNT(*) FROM mobile_station_data')
+            current_count = c.fetchone()[0]
+            if current_count <= max_records:
+                return 0
+
+            overflow = current_count - max_records
+            c.execute('''
+                DELETE FROM mobile_station_data
+                WHERE id IN (
+                    SELECT id FROM mobile_station_data
+                    ORDER BY id ASC
+                    LIMIT ?
+                )
+            ''', (overflow,))
+            deleted = c.rowcount
+            conn.commit()
+            if deleted > 0:
+                log_info(f'已清理 {deleted} 条移动站数据（保留上限 {max_records} 条），当前 {current_count - deleted} 条')
+                log_database_operation('cleanup_old_mobile_data', 'mobile_station_data', True, f'删除 {deleted} 条记录')
+            return deleted
+        except Exception as e:
+            log_error(f'清理移动站数据失败: {e}', exc_info=True)
+            log_database_operation('cleanup_old_mobile_data', 'mobile_station_data', False, str(e))
+            return 0
+        finally:
+            pass
 
 
 class DatabaseManager:
@@ -956,7 +1193,8 @@ class DatabaseManager:
     
     def get_user_password(self, username):
         """获取用户密码，用于Digest认证"""
-        with sqlite3.connect(config.DATABASE_PATH) as conn:
+        with db_lock:
+            conn = _get_conn()
             c = conn.cursor()
             c.execute("SELECT password FROM users WHERE username = ?", (username,))
             result = c.fetchone()
@@ -964,14 +1202,16 @@ class DatabaseManager:
     
     def check_mount_exists_in_db(self, mount):
         """检查挂载点是否在数据库中存在"""
-        with sqlite3.connect(config.DATABASE_PATH) as conn:
+        with db_lock:
+            conn = _get_conn()
             c = conn.cursor()
             c.execute("SELECT id FROM mounts WHERE mount = ?", (mount,))
             return c.fetchone() is not None
     
     def verify_download_user(self, mount, username, password):
         """验证下载用户，只验证用户名密码，不验证挂载点绑定关系"""
-        with sqlite3.connect(config.DATABASE_PATH) as conn:
+        with db_lock:
+            conn = _get_conn()
             c = conn.cursor()
             
             c.execute("SELECT id FROM mounts WHERE mount = ?", (mount,))
@@ -1003,7 +1243,7 @@ class DatabaseManager:
     def update_mount_password(self, mount, new_password):
         """更新挂载点密码"""
         with db_lock:
-            conn = sqlite3.connect(config.DATABASE_PATH)
+            conn = _get_conn()
             c = conn.cursor()
             try:
                 c.execute("UPDATE mounts SET password = ? WHERE mount = ?", (new_password, mount))
@@ -1015,7 +1255,7 @@ class DatabaseManager:
             except Exception as e:
                 return False, f"更新挂载点密码失败: {str(e)}"
             finally:
-                conn.close()
+                pass
     
     def update_user(self, user_id, username, password):
         """更新用户信息"""
@@ -1075,9 +1315,9 @@ class DatabaseManager:
         """记录连接事件日志"""
         return add_connection_event(event_type, mount_name, username, ip_address, duration, reason, details)
     
-    def get_connection_events(self, limit=100, offset=0, event_type=None, mount_name=None, username=None, start_time=None, end_time=None):
+    def get_connection_events(self, limit=100, offset=0, event_type=None, mount_name=None, username=None, start_time=None, end_time=None, sort_by='event_time', sort_order='DESC'):
         """获取连接事件日志列表"""
-        return get_connection_events(limit, offset, event_type, mount_name, username, start_time, end_time)
+        return get_connection_events(limit, offset, event_type, mount_name, username, start_time, end_time, sort_by, sort_order)
     
     def get_connection_events_statistics(self, start_time=None, end_time=None):
         """获取连接事件统计"""
@@ -1090,4 +1330,20 @@ class DatabaseManager:
     def cleanup_old_connection_events(self, retention_days=365, max_records=100000):
         """清理连接事件日志"""
         return cleanup_old_connection_events(retention_days, max_records)
+
+    def add_mobile_data_batch(self, rows):
+        """批量插入移动站 GGA 数据"""
+        return add_mobile_data_batch(rows)
+
+    def get_mobile_data(self, limit=100, offset=0, username=None, mount_name=None, start_time=None, end_time=None, sort_by='event_time', sort_order='DESC'):
+        """获取移动站 GGA 数据列表"""
+        return get_mobile_data(limit, offset, username, mount_name, start_time, end_time, sort_by, sort_order)
+
+    def get_mobile_data_count(self, username=None, mount_name=None, start_time=None, end_time=None):
+        """获取移动站 GGA 数据总数"""
+        return get_mobile_data_count(username, mount_name, start_time, end_time)
+
+    def cleanup_old_mobile_data(self, max_records=100000):
+        """清理移动站 GGA 数据"""
+        return cleanup_old_mobile_data(max_records)
     

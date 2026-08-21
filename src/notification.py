@@ -7,12 +7,13 @@ notification.py - 消息机器人通知模块
 
 import json
 import time
+import queue
 import urllib.request
 import urllib.error
 import hmac
 import hashlib
 import base64
-from threading import Thread
+from threading import Thread, Lock
 from urllib.parse import quote_plus
 
 from . import config
@@ -230,20 +231,62 @@ def notify_base_station_offline(mount_name, ip_address, owner=None, connect_time
 
 _notification_bots_loader = None
 
+# 机器人配置缓存（DB查询移出热路径，带TTL定期刷新）
+_bot_cache = None
+_bot_cache_time = 0.0
+_BOT_CACHE_TTL = 30  # 秒
+_bot_cache_lock = Lock()
+
+# 通知发送：使用单个工作线程处理队列，避免每个事件新建线程
+_send_queue = queue.Queue(maxsize=1000)
+_worker_started = False
+_worker_lock = Lock()
+
 
 def _get_notification_bots():
-    """获取启用的机器人配置(延迟加载避免循环导入)"""
-    global _notification_bots_loader
-    if _notification_bots_loader is None:
-        # 延迟导入，避免启动时循环依赖
-        from .database import get_notification_bots
-        _notification_bots_loader = get_notification_bots
-    return _notification_bots_loader()
+    """获取启用的机器人配置（带TTL缓存，避免在NTRIP连接热路径上频繁查询DB）"""
+    global _bot_cache, _bot_cache_time, _notification_bots_loader
+    now = time.time()
+    with _bot_cache_lock:
+        if _bot_cache is None or (now - _bot_cache_time) > _BOT_CACHE_TTL:
+            if _notification_bots_loader is None:
+                # 延迟导入，避免启动时循环依赖
+                from .database import get_notification_bots
+                _notification_bots_loader = get_notification_bots
+            try:
+                _bot_cache = _notification_bots_loader()
+            except Exception as e:
+                log_error(f"加载机器人配置缓存失败: {e}")
+                _bot_cache = []
+            _bot_cache_time = now
+        return _bot_cache
+
+
+def invalidate_notification_bots_cache():
+    """清除机器人配置缓存（添加/修改/删除机器人配置后调用）"""
+    global _bot_cache, _bot_cache_time
+    with _bot_cache_lock:
+        _bot_cache = None
+        _bot_cache_time = 0.0
+
+
+def _send_worker():
+    """通知发送工作线程：串行消费队列"""
+    while True:
+        item = _send_queue.get()
+        if item is None:
+            break
+        bots, event_type, event_data = item
+        for bot in bots:
+            try:
+                send_notification(bot, event_type, event_data)
+            except Exception as e:
+                log_error(f"发送通知给机器人 {bot.get('name')} 失败: {e}")
 
 
 def notify(event_type, event_data):
-    """触发事件通知，异步发送给所有订阅的机器人
-    
+    """触发事件通知，使用缓存+队列异步发送给所有订阅的机器人
+
     Args:
         event_type: 事件类型，如 'mount_online', 'mount_offline'
         event_data: 事件数据字典
@@ -252,15 +295,18 @@ def notify(event_type, event_data):
         bots = _get_notification_bots()
         if not bots:
             return
-        
-        def send_all():
-            for bot in bots:
-                try:
-                    send_notification(bot, event_type, event_data)
-                except Exception as e:
-                    log_error(f"发送通知给机器人 {bot.get('name')} 失败: {e}")
-        
-        Thread(target=send_all, daemon=True).start()
+
+        global _worker_started
+        with _worker_lock:
+            if not _worker_started:
+                _worker_started = True
+                Thread(target=_send_worker, daemon=True).start()
+
+        try:
+            _send_queue.put_nowait((bots, event_type, event_data))
+        except queue.Full:
+            # 通知队列已满时直接丢弃，避免阻塞NTRIP连接热路径
+            pass
     except Exception as e:
         log_error(f"触发通知失败: {e}")
 

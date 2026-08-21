@@ -177,6 +177,37 @@
             grid-column: 1 / -1;
         }
 
+        /* 列表型页面（连接事件 / 数据查看）：内容面板约束高度，让内部表格滚动 */
+        .content-panel.list-page {
+            max-height: calc(100vh - 4rem);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            padding: 1.25rem 1.5rem;
+        }
+        .content-panel.list-page .settings-container {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            max-width: 100% !important;
+        }
+        .content-panel.list-page .settings-section {
+            flex: 0 0 auto;
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.75rem;
+        }
+        .content-panel.list-page #mobile-data-list,
+        .content-panel.list-page #connection-events-list {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .content-panel.list-page .table-container {
+            max-height: 800px !important;
+        }
+
         /* 内容面板 */
         .content-panel {
             background: rgba(255, 255, 255, 0.95);
@@ -798,26 +829,33 @@
             box-shadow: 0 4px 15px rgba(243, 156, 18, 0.4);
         }
 
-        /* 新的监控页面样式 */
+        /* 页面标题栏：紧凑、与操作按钮同行 */
         .page-header {
-            text-align: center;
-            margin-bottom: 2rem;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+            margin: 0 0 0.75rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #e9ecef;
         }
 
         .page-header h3 {
             color: #2c3e50;
-            font-size: 2rem;
-            margin-bottom: 0.5rem;
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin: 0;
             display: flex;
             align-items: center;
-            justify-content: center;
-            gap: 0.5rem;
+            gap: 0.4rem;
         }
 
         .page-subtitle {
             color: #6c757d;
-            font-size: 1rem;
+            font-size: 0.85rem;
             margin: 0;
+            flex-basis: 100%;
+            margin-top: 0.15rem;
         }
 
         .monitor-dashboard {
@@ -1603,11 +1641,6 @@
 </head>
 <body>
     <div class="container">
-        <!-- 顶部标题 -->
-        <div class="header">
-            <h1>2RTK Ntrip Caster</h1>
-        </div>
-
         <!-- 导航栏 -->
         <nav class="navbar">
             <div class="nav-container">
@@ -1615,6 +1648,7 @@
                 <a href="#" class="nav-item" data-page="users" onclick="navigateTo('users')">移动站管理</a>
                 <a href="#" class="nav-item" data-page="mounts" onclick="navigateTo('mounts')">挂载点管理</a>
                 <a href="#" class="nav-item" data-page="connection_events" onclick="navigateTo('connection_events')">连接事件</a>
+                <a href="#" class="nav-item" data-page="data_view" onclick="navigateTo('data_view')">数据查看</a>
                 <a href="#" class="nav-item" data-page="monitor" onclick="navigateTo('monitor')">数据源</a>
                 <a href="#" class="nav-item" data-page="settings" onclick="navigateTo('settings')">系统设置</a>
                 <a href="#" class="nav-item" onclick="logout()">退出登录</a>
@@ -1640,16 +1674,6 @@
             </div>
         </main>
 
-    
-        <footer class="footer">
-            <div id="footer-content">
-                <span id="app-name">{{ app_name or '2RTK Ntrip Caster' }}</span> 
-                <span id="app-version">v{{ app_version or '2.2.0' }}</span> | 
-                © {{ current_year or 2025 }} <span id="app-author">2RTK </span> | 
-                Contact: <a href="mailto:{{ contact_email or 'i@jia.by' }}" id="app-contact">{{ contact_email or 'i@jia.by' }}</a> | 
-                Website: <a href="https://{{ website_url or '2RTK.COM' }}" id="app-website" target="_blank">{{ website_url or '2RTK.COM' }}</a>
-            </div>
-        </footer>
     </div>
 
     <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
