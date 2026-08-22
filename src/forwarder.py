@@ -253,6 +253,7 @@ class SimpleDataForwarder:
     
     def _start_gga_reader(self, client_info):
         """注册客户端socket到单一线程的selector轮询（不再为每个客户端单独起线程）"""
+        import selectors  # 模块顶部 import 会让 self.gga_selector 已存在时仍可访问 selectors.EVENT_READ
         socket_obj = client_info.get('socket')
         if not socket_obj:
             return
@@ -264,7 +265,6 @@ class SimpleDataForwarder:
 
         with self.gga_reader_lock:
             if self.gga_selector is None:
-                import selectors
                 self.gga_selector = selectors.DefaultSelector()
             self.gga_selector.register(socket_obj, selectors.EVENT_READ, client_info)
             self.gga_buffers[socket_obj] = b''
