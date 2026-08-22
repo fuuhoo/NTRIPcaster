@@ -10,31 +10,47 @@ import configparser
 from pathlib import Path
 from typing import List, Tuple
 
-CONFIG_FILE = os.environ.get('NTRIP_CONFIG_FILE', 
+CONFIG_FILE = os.environ.get('NTRIP_CONFIG_FILE',
                             os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.ini'))
 
-config = configparser.ConfigParser()
+# 关键：让 ConfigParser 大小写不敏感。
+#   - optionxform = str → key 大小写不敏感（ConfigParser 默认行为，这里显式声明以防 future 改动）
+#   - 自定义 _section_lower_map 在加载后建立 小写→原名 映射，让 get_config_value
+#     做大小写不敏感的 section 查找。
+# 原因：config.ini.example 的 section 是 [NTRIP]/[DATABASE] 等大写，
+#       本地 config.ini 是 [ntrip]/[database] 等小写，而 config.py 查询都用小写。
+#       Python ConfigParser 默认对 section 名大小写敏感，导致容器内复制 example 后
+#       读不到任何配置，DATABASE_PATH 回退到 '2rtk.db' 相对路径，DB 写到 /app/2rtk.db
+#       而不是 volume 挂载的 /app/data/，容器重启后 DB 丢失。
+config = configparser.ConfigParser(interpolation=None)  # 关闭 interpolation，否则 %(asctime)s 这类 format string 会被当 interpolation
+config.optionxform = str
+_section_lower_map = {}
 
 if os.path.exists(CONFIG_FILE):
     print(f"加载配置文件: {CONFIG_FILE}")
     config.read(CONFIG_FILE, encoding='utf-8')
+    _section_lower_map = {s.lower(): s for s in config.sections()}
 else:
     raise FileNotFoundError(f"配置文件 {CONFIG_FILE} 不存在")
 
 def get_config_value(section, key, fallback=None, value_type=str):
-    """获取配置值并转换类型"""
+    """获取配置值并转换类型
+
+    section 名大小写不敏感（[DATABASE] 和 [database] 等价）。
+    """
+    actual_section = _section_lower_map.get(section.lower(), section)
     try:
         if value_type == bool:
-            return config.getboolean(section, key, fallback=fallback)
+            return config.getboolean(actual_section, key, fallback=fallback)
         elif value_type == int:
-            return config.getint(section, key, fallback=fallback)
+            return config.getint(actual_section, key, fallback=fallback)
         elif value_type == float:
-            return config.getfloat(section, key, fallback=fallback)
+            return config.getfloat(actual_section, key, fallback=fallback)
         elif value_type == list:
-            value = config.get(section, key, fallback='')
+            value = config.get(actual_section, key, fallback='')
             return [item.strip() for item in value.split(',') if item.strip()] if value else fallback or []
         else:
-            return config.get(section, key, fallback=fallback)
+            return config.get(actual_section, key, fallback=fallback)
     except (configparser.NoSectionError, configparser.NoOptionError):
         return fallback
 
