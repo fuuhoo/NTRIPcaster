@@ -65,16 +65,11 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
-          # 注：阿里云 ACR 个人版不支持 OCI 镜像格式（vnd.oci.empty.v1+json），
-          # 多平台构建（linux/amd64,linux/arm64）会被拒绝。
+          # 注：阿里云 ACR 个人版不支持 OCI 镜像格式（vnd.oci.empty.v1+json）。
+          # buildx 默认就发 OCI 媒体类型（与是否多平台无关），所以必须用
+          # outputs 强制 oci-mediatypes=false 改成 Docker manifest v2。
           #
-          # 两个解决方案：
-          #   方案 A（当前，单平台，简单）: platforms: linux/amd64
-          #   方案 B（多架构 + 强制 Docker manifest v2）:
-          #     platforms: linux/amd64,linux/arm64
-          #     outputs: type=image,push=true,oci-mediatypes=false
-          #     # 注意：用了 outputs 就要去掉 push: true
+          # 用 outputs: type=image,push=true 时，push: true 必须删掉。
           platforms: linux/amd64
           tags: |
             ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.ACR_REPOSITORY }}:${{ github.event.inputs.tag || 'latest' }}
@@ -85,6 +80,7 @@ jobs:
           build-args: |
             BUILD_DATE=${{ github.event.repository.updated_at }}
             VCS_REF=${{ github.sha }}
+          outputs: type=image,push=true,oci-mediatypes=false
 
       - name: Verify pushed image
         run: |
