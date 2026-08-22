@@ -1291,6 +1291,10 @@ a=control:*
         旧实现用 getsockopt(SO_ERROR) 检测断开，对客户端正常 FIN 关闭无能为力，
         会导致用户卡在 online_users 状态、mount_offline 永远不记录。
         新实现用 select() 等待 socket 可读，recv(MSG_PEEK) 判 EOF。
+
+        关键：keep-alive 与 forwarder 的 GGA reader loop 共用同一个 socket，
+        必须用 MSG_PEEK 探测，不真正读数据。否则会出现竞态：
+        GGA reader 先消费了 GGA → keep-alive 后到 PEEK 返回 0 误判 EOF。
         """
         import select
         try:
@@ -1304,18 +1308,16 @@ a=control:*
 
                 if r:
                     # socket 可读：用 MSG_PEEK 判断是 EOF 还是真实数据
+                    # 关键：只 PEEK，不消费！GGA reader 才是真正的消费者。
                     try:
                         data = self.client_socket.recv(1, socket.MSG_PEEK)
                         if not data:
                             # 客户端正常关闭 (FIN)，EOF
                             log_info(f"客户端 {self.client_address} 已关闭连接 (EOF)")
                             break
-                        # 有数据（下载连接一般不收数据，但 NTRIP 客户端偶尔会发 NMEA GGA）
-                        # 实际读取并丢弃，避免下次 select 一直触发
-                        try:
-                            self.client_socket.recv(4096)
-                        except OSError:
-                            break
+                        # 有数据（GGA），不读。GGA reader 循环会读。
+                        # 短暂 sleep 让 GGA reader 有机会消费，避免紧密循环
+                        time.sleep(0.01)
                     except (BlockingIOError, InterruptedError):
                         # 暂时无数据，继续等
                         pass
