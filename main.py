@@ -305,7 +305,7 @@ class ServiceManager:
                 cycles += 1
                 force = (cycles % deep_check_interval == 0)
                 try:
-                    cm = connection.get_connection_manager()
+                    cm = get_connection_manager()
                     cm.cleanup_stale_user_connections(
                         max_idle_seconds=idle_threshold,
                         force_check=force,
