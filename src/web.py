@@ -1426,6 +1426,7 @@ class WebManager:
                 mount_name = request.args.get('mount_name') or None
                 start_time = request.args.get('start_time') or None
                 end_time = request.args.get('end_time') or None
+                gga_quality = request.args.get('gga_quality') or None
                 sort_by = request.args.get('sort_by') or 'event_time'
                 sort_order = request.args.get('sort_order') or 'DESC'
 
@@ -1436,6 +1437,7 @@ class WebManager:
                     mount_name=mount_name,
                     start_time=start_time,
                     end_time=end_time,
+                    gga_quality=gga_quality,
                     sort_by=sort_by,
                     sort_order=sort_order,
                 )
@@ -1444,6 +1446,7 @@ class WebManager:
                     mount_name=mount_name,
                     start_time=start_time,
                     end_time=end_time,
+                    gga_quality=gga_quality,
                 )
 
                 # 后端白名单校验后的实际排序值

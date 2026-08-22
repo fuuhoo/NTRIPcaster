@@ -152,13 +152,20 @@ def init_db():
             ip_address TEXT,
             nmea_type TEXT,
             raw_data TEXT NOT NULL,
-            data_size INTEGER
+            data_size INTEGER,
+            gga_quality INTEGER
         )
         ''')
         # 主键 id 自增，单调递增，按 id 升序删除即等价于按时间删除（且更快）
         c.execute('CREATE INDEX IF NOT EXISTS idx_msd_event_time ON mobile_station_data(event_time)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_msd_username   ON mobile_station_data(username)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_msd_mount_name ON mobile_station_data(mount_name)')
+        # 兼容旧 DB：检查 gga_quality 列是否存在，不存在则加
+        c.execute("PRAGMA table_info(mobile_station_data)")
+        cols = {row[1] for row in c.fetchall()}
+        if 'gga_quality' not in cols:
+            c.execute('ALTER TABLE mobile_station_data ADD COLUMN gga_quality INTEGER')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_msd_gga_quality ON mobile_station_data(gga_quality)')
         
         c.execute("SELECT * FROM admins")
         if not c.fetchone():
@@ -976,8 +983,8 @@ def add_mobile_data_batch(rows):
     长持 db_lock 阻塞 Web API 请求、造成页面卡顿。
 
     Args:
-        rows: 可迭代对象，每个元素为 (event_time, username, mount_name, ip_address, nmea_type, raw_data, data_size)
-              event_time 可为 None（由 DB 默认填充）
+        rows: 可迭代对象，每个元素为 (event_time, username, mount_name, ip_address, nmea_type, raw_data, data_size, gga_quality)
+              event_time 可为 None（由 DB 默认填充）；gga_quality 可为 None
     """
     if not rows:
         return 0
@@ -988,8 +995,8 @@ def add_mobile_data_batch(rows):
             conn.execute('BEGIN')
             c.executemany('''
                 INSERT INTO mobile_station_data
-                (event_time, username, mount_name, ip_address, nmea_type, raw_data, data_size)
-                VALUES (COALESCE(?, datetime('now', 'localtime')), ?, ?, ?, ?, ?, ?)
+                (event_time, username, mount_name, ip_address, nmea_type, raw_data, data_size, gga_quality)
+                VALUES (COALESCE(?, datetime('now', 'localtime')), ?, ?, ?, ?, ?, ?, ?)
             ''', rows)
             conn.execute('COMMIT')
             return c.rowcount
@@ -1004,8 +1011,13 @@ def add_mobile_data_batch(rows):
             pass
 
 
-def get_mobile_data_count(username=None, mount_name=None, start_time=None, end_time=None):
-    """获取移动站 GGA 数据总数（用于分页）"""
+def get_mobile_data_count(username=None, mount_name=None, start_time=None, end_time=None, gga_quality=None):
+    """获取移动站 GGA 数据总数（用于分页）
+
+    gga_quality: 差分状态码过滤。
+        - 整数 0-8：精确匹配
+        - 'rtk' / 'differential'：常用聚合筛选（4/5 RTK 固定/浮点 + 2 DGPS）
+    """
     with db_lock:
         conn = _get_conn()
         c = conn.cursor()
@@ -1024,10 +1036,51 @@ def get_mobile_data_count(username=None, mount_name=None, start_time=None, end_t
             if end_time:
                 query += ' AND event_time <= ?'
                 params.append(end_time)
+            if gga_quality is not None:
+                _quality_clause, _quality_params = _build_quality_clause(gga_quality)
+                query += ' AND ' + _quality_clause
+                params.extend(_quality_params)
             c.execute(query, params)
             return c.fetchone()[0]
         finally:
             pass
+
+
+def _build_quality_clause(gga_quality):
+    """根据 gga_quality 参数构造 WHERE 子句 + 参数列表。
+
+    支持的取值：
+        - 'rtk' 或 'differential'：gga_quality IN (2, 4, 5) （DGPS + RTK 固定 + RTK 浮点）
+        - 'fixed'：gga_quality = 4 (RTK 固定)
+        - 'float'：gga_quality = 5 (RTK 浮点)
+        - 'invalid'：gga_quality = 0
+        - 'none'：gga_quality IS NULL
+        - 整数 0-8 或可转 int 的字符串：精确匹配
+    返回: (clause_string, params_list)
+    """
+    if gga_quality is None:
+        return '1=1', []
+    # 字符串预设
+    s = str(gga_quality).strip().lower()
+    if s in ('rtk', 'differential', 'diff'):
+        return 'gga_quality IN (2, 4, 5)', []
+    if s in ('fixed', 'rtk_fixed', 'fix'):
+        return 'gga_quality = ?', [4]
+    if s in ('float', 'rtk_float'):
+        return 'gga_quality = ?', [5]
+    if s in ('invalid', 'none_quality'):
+        return 'gga_quality = ?', [0]
+    if s in ('null', 'empty'):
+        return 'gga_quality IS NULL', []
+    # 整数 / 数字字符串：精确匹配
+    try:
+        q = int(s)
+        if 0 <= q <= 8:
+            return 'gga_quality = ?', [q]
+    except (ValueError, TypeError):
+        pass
+    # 无法识别：不加过滤（返回所有）
+    return '1=1', []
 
 
 # 移动站 GGA 数据允许排序的字段（白名单防 SQL 注入）
@@ -1036,7 +1089,7 @@ MOBILE_DATA_SORT_FIELDS = {
 }
 
 
-def get_mobile_data(limit=100, offset=0, username=None, mount_name=None, start_time=None, end_time=None, sort_by='event_time', sort_order='DESC'):
+def get_mobile_data(limit=100, offset=0, username=None, mount_name=None, start_time=None, end_time=None, gga_quality=None, sort_by='event_time', sort_order='DESC'):
     """获取移动站 GGA 数据列表
 
     Args:
@@ -1046,6 +1099,7 @@ def get_mobile_data(limit=100, offset=0, username=None, mount_name=None, start_t
         mount_name: 按挂载点筛选
         start_time: 开始时间（格式 'YYYY-MM-DD HH:MM:SS'）
         end_time: 结束时间（格式 'YYYY-MM-DD HH:MM:SS'）
+        gga_quality: 差分状态筛选。'rtk'/'fixed'/'float'/'invalid'/'null'/<0-8 整数>，详见 _build_quality_clause
         sort_by: 排序字段，必须在 MOBILE_DATA_SORT_FIELDS 白名单内
         sort_order: 排序方向，'ASC' 或 'DESC'
     """
@@ -1059,7 +1113,7 @@ def get_mobile_data(limit=100, offset=0, username=None, mount_name=None, start_t
         c = conn.cursor()
         try:
             query = '''
-                SELECT id, event_time, username, mount_name, ip_address, nmea_type, raw_data, data_size
+                SELECT id, event_time, username, mount_name, ip_address, nmea_type, raw_data, data_size, gga_quality
                 FROM mobile_station_data
                 WHERE 1=1
             '''
@@ -1076,6 +1130,10 @@ def get_mobile_data(limit=100, offset=0, username=None, mount_name=None, start_t
             if end_time:
                 query += ' AND event_time <= ?'
                 params.append(end_time)
+            if gga_quality is not None:
+                _quality_clause, _quality_params = _build_quality_clause(gga_quality)
+                query += ' AND ' + _quality_clause
+                params.extend(_quality_params)
             # ORDER BY 字段名是白名单常量，order 方向只能是 ASC/DESC，不存在 SQL 注入
             query += f' ORDER BY {sort_by} {sort_order} LIMIT ? OFFSET ?'
             params.append(limit)
@@ -1095,6 +1153,7 @@ def get_mobile_data(limit=100, offset=0, username=None, mount_name=None, start_t
                     'nmea_type': row[5],
                     'raw_data': row[6],
                     'data_size': row[7],
+                    'gga_quality': row[8],
                 })
             return result
         finally:
@@ -1335,13 +1394,13 @@ class DatabaseManager:
         """批量插入移动站 GGA 数据"""
         return add_mobile_data_batch(rows)
 
-    def get_mobile_data(self, limit=100, offset=0, username=None, mount_name=None, start_time=None, end_time=None, sort_by='event_time', sort_order='DESC'):
+    def get_mobile_data(self, limit=100, offset=0, username=None, mount_name=None, start_time=None, end_time=None, gga_quality=None, sort_by='event_time', sort_order='DESC'):
         """获取移动站 GGA 数据列表"""
-        return get_mobile_data(limit, offset, username, mount_name, start_time, end_time, sort_by, sort_order)
+        return get_mobile_data(limit, offset, username, mount_name, start_time, end_time, gga_quality, sort_by, sort_order)
 
-    def get_mobile_data_count(self, username=None, mount_name=None, start_time=None, end_time=None):
+    def get_mobile_data_count(self, username=None, mount_name=None, start_time=None, end_time=None, gga_quality=None):
         """获取移动站 GGA 数据总数"""
-        return get_mobile_data_count(username, mount_name, start_time, end_time)
+        return get_mobile_data_count(username, mount_name, start_time, end_time, gga_quality)
 
     def cleanup_old_mobile_data(self, max_records=100000):
         """清理移动站 GGA 数据"""

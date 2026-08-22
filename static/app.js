@@ -1854,6 +1854,19 @@ function getDataViewContent() {
     const pageSizeOptions = MOBILE_DATA_PAGE_SIZE_OPTIONS
         .map(n => `<option value="${n}" ${n === 100 ? 'selected' : ''}>${n} 条/页</option>`)
         .join('');
+    // 差分状态下拉：value 与后端 _build_quality_clause 协议一致
+    //   '' = 全部；'rtk' = 2/4/5 聚合；'fixed'/'float'/'invalid'/'null' = 单值；'0'..'8' = 精确数值
+    const qualityOptions = [
+        { v: '', l: '全部' },
+        { v: 'rtk', l: '差分中 (DGPS/RTK)' },
+        { v: 'fixed', l: 'RTK 固定 (4)' },
+        { v: 'float', l: 'RTK 浮点 (5)' },
+        { v: 'invalid', l: '无效 (0)' },
+        { v: 'null', l: '未知 (未解析)' },
+    ];
+    const qualitySelect = qualityOptions
+        .map(o => `<option value="${o.v}">${o.l}</option>`)
+        .join('');
     return `
         <div class="page-header">
             <h3>数据查看</h3>
@@ -1864,6 +1877,9 @@ function getDataViewContent() {
                 <div class="form-group" style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 0;">
                     <input type="text" id="mobile-data-user" placeholder="用户名" class="form-control" style="width: auto; min-width: 140px;">
                     <input type="text" id="mobile-data-mount" placeholder="挂载点名称" class="form-control" style="width: auto; min-width: 140px;">
+                    <select id="mobile-data-quality" class="form-control" style="width: auto; min-width: 140px;" title="差分状态筛选">
+                        ${qualitySelect}
+                    </select>
                     <input type="datetime-local" id="mobile-data-start" class="form-control" style="width: auto; min-width: 160px;">
                     <input type="datetime-local" id="mobile-data-end" class="form-control" style="width: auto; min-width: 160px;">
                     <button onclick="loadMobileData(0, mobileDataPageSize)" class="btn btn-primary">查询</button>
@@ -1890,11 +1906,13 @@ function changeMobileDataPageSize(newSize) {
 function resetMobileDataFilter() {
     const userEl = document.getElementById('mobile-data-user');
     const mountEl = document.getElementById('mobile-data-mount');
+    const qualityEl = document.getElementById('mobile-data-quality');
     const startEl = document.getElementById('mobile-data-start');
     const endEl = document.getElementById('mobile-data-end');
     const pageSizeEl = document.getElementById('mobile-data-page-size');
     if (userEl) userEl.value = '';
     if (mountEl) mountEl.value = '';
+    if (qualityEl) qualityEl.value = '';
     if (startEl) startEl.value = '';
     if (endEl) endEl.value = '';
     if (pageSizeEl) pageSizeEl.value = '100';
@@ -1906,6 +1924,7 @@ async function loadMobileData(offset = 0, limit = 100) {
     try {
         const username = document.getElementById('mobile-data-user')?.value.trim() || '';
         const mountName = document.getElementById('mobile-data-mount')?.value.trim() || '';
+        const quality = document.getElementById('mobile-data-quality')?.value || '';
         const startInput = document.getElementById('mobile-data-start')?.value || '';
         const endInput = document.getElementById('mobile-data-end')?.value || '';
         const startTime = startInput ? startInput.replace('T', ' ') + ':00' : '';
@@ -1914,6 +1933,7 @@ async function loadMobileData(offset = 0, limit = 100) {
         const params = new URLSearchParams();
         if (username) params.append('username', username);
         if (mountName) params.append('mount_name', mountName);
+        if (quality) params.append('gga_quality', quality);
         if (startTime) params.append('start_time', startTime);
         if (endTime) params.append('end_time', endTime);
         params.append('limit', String(limit));
@@ -2008,12 +2028,21 @@ function renderMobileData(rows, pagination = null) {
         const mount = r.mount_name ? escapeHtml(r.mount_name) : '-';
         const nmeaType = r.nmea_type ? escapeHtml(r.nmea_type) : '-';
         const rawData = r.raw_data ? escapeHtml(r.raw_data) : '-';
+        // 差分状态：复用前端的 GGA_QUALITY_MAP，未知/null 单独显示
+        let qualityCell;
+        if (r.gga_quality === null || r.gga_quality === undefined) {
+            qualityCell = `<span style="color: #adb5bd;">未解析</span>`;
+        } else {
+            const info = GGA_QUALITY_MAP[r.gga_quality] || { label: r.gga_quality + '-未知', color: '#6c757d' };
+            qualityCell = `<span style="color: ${info.color}; font-weight: 600;">${info.label}</span>`;
+        }
         return `
             <tr>
                 <td style="white-space: nowrap;">${escapeHtml(time)}</td>
                 <td>${user}</td>
                 <td>${mount}</td>
                 <td><code>${nmeaType}</code></td>
+                <td>${qualityCell}</td>
                 <td style="font-family: monospace; font-size: 0.85em; word-break: break-all;">${rawData}</td>
             </tr>
         `;
@@ -2021,13 +2050,14 @@ function renderMobileData(rows, pagination = null) {
 
     container.innerHTML = `
         <div class="table-container" style="max-height: 800px; overflow-y: auto;">
-            <table class="data-table" style="min-width: 600px;">
+            <table class="data-table" style="min-width: 750px;">
                 <thead style="position: sticky; top: 0; z-index: 1; background: #f8f9fa;">
                     <tr>
                         <th style="white-space: nowrap; cursor: pointer; user-select: none;" onclick="sortMobileData('event_time')" title="点击按时间排序">时间 ${sortIndicator('event_time')}</th>
                         <th style="cursor: pointer; user-select: none;" onclick="sortMobileData('username')" title="点击按用户名排序">用户名 ${sortIndicator('username')}</th>
                         <th style="cursor: pointer; user-select: none;" onclick="sortMobileData('mount_name')" title="点击按挂载点排序">挂载点 ${sortIndicator('mount_name')}</th>
                         <th>NMEA 类型</th>
+                        <th>差分状态</th>
                         <th>原始数据</th>
                     </tr>
                 </thead>

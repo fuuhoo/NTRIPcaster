@@ -380,6 +380,7 @@ class SimpleDataForwarder:
                                     nmea_type,
                                     line,
                                     len(line),
+                                    quality,  # gga_quality: _parse_gga_quality 返回值，None 表示无效/未解析
                                 )
                                 self.mobile_data_queue.put_nowait(row)
                             except queue.Full:
