@@ -66,3 +66,5 @@ events.js
 *.deb
 .pylib/
 run_ntrip.sh
+start_local.sh
+quick-start.sh
