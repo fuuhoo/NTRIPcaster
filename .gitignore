@@ -59,3 +59,10 @@ late_app_js.py
 translate_app_js.py
 cleanup.py
 events.js
+
+# 本地运行产生的临时文件
+*.db-shm
+*.db-wal
+*.deb
+.pylib/
+run_ntrip.sh
