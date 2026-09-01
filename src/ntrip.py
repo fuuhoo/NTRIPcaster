@@ -8,6 +8,7 @@ import sys
 import time
 import socket
 import logging
+import re
 import threading
 import base64
 from datetime import datetime, timezone
@@ -167,7 +168,11 @@ class NTRIPHandler:
                 self.send_error_response(400, f"Bad Request: {error_msg}")
                 return
             
-            self.user_agent = headers.get('user-agent', 'Unknown')
+            _raw_ua = headers.get('user-agent', 'Unknown') or 'Unknown'
+            # 净化 User-Agent：去除控制字符与 HTML 危险字符并截断。
+            # UA 会原样入库并在管理界面展示，不净化会造成存储型 XSS
+            _safe_ua = re.sub(r'[\x00-\x1f\x7f<>&"\'`\\]', '', _raw_ua)[:200].strip()
+            self.user_agent = _safe_ua or 'Unknown'
             
             # 改为debug级别，避免频繁日志
             log_debug(f"请求验证通过 {self.client_address}: {method} {path} (协议: {self.protocol_type})")
@@ -1056,11 +1061,15 @@ a=control:*
             # print(f"\n>>> 新的上传请求 - IP: {self.client_address[0]}, 挂载点: {path.lstrip('/')}, 时间: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
             # print(f">>> 请求详情 - 方法: POST, 路径: {path}, 用户代理: {headers.get('User-Agent', 'Unknown')}")
             
-            connection.get_connection_manager().cleanup_zombie_connections()
+            # cleanup_zombie_connections 已废弃：基于 netstat 的解析在 IPv6/主机名反解场景
+            # 会得到空集，进而把所有在线挂载点误判为僵尸批量强断，且本函数位于上传热路径
             connection.get_connection_manager().force_refresh_connections()
             
             # 提取挂载点名称
             mount = path.lstrip('/')
+            # 净化挂载点名：匿名模式下会自动注册入库并在管理界面展示，
+            # 必须去除控制字符与 HTML 危险字符防止存储型 XSS（合法名称不受影响）
+            mount = re.sub(r'[\x00-\x1f\x7f<>&"\'`\\]', '', mount)[:100].strip()
             if not mount:
                 self.send_error_response(400, "Missing mount point")
                 return
@@ -1161,6 +1170,8 @@ a=control:*
                 return
             
             mount = path.lstrip('/')
+            # 同上传路径：净化后再入库/展示（净化后为空会因挂载点不存在而 404）
+            mount = re.sub(r'[\x00-\x1f\x7f<>&"\'`\\]', '', mount)[:100].strip()
             self.mount = mount
 
             auth_header = next((v for k, v in headers.items() if k.lower() == 'authorization'), '')
@@ -1174,8 +1185,8 @@ a=control:*
                 self.send_error_response(404, "Mount point not found")
                 return
             
-            # 添加到连接管理器
-            connection_id = connection.add_user_connection(self.username, mount, self.client_address[0])
+            # 添加到连接管理器（传入真实 socket：空闲深度探测需要它做 MSG_PEEK 存活检测）
+            connection_id = connection.add_user_connection(self.username, mount, self.client_address[0], client_socket=self.client_socket)
 
             # 添加客户端到转发器
             try:
@@ -1187,7 +1198,8 @@ a=control:*
                     # 修复：add_user_connection 已成功（已记录 mount_online 并加入 online_users），
                     #      此处必须回滚，否则用户永远卡在 online 状态，mount_offline 永远丢失
                     try:
-                        connection.remove_user_connection(self.username, mount_name=mount, reason="添加到转发器失败")
+                        # 按 connection_id 精确回滚，避免误删同账号其它连接
+                        connection.remove_user_connection(self.username, connection_id=connection_id, reason="添加到转发器失败")
                     except Exception as cleanup_err:
                         logger.log_error(f"add_user_connection 回滚失败: {cleanup_err}", exc_info=True)
                     return
@@ -1196,7 +1208,8 @@ a=control:*
                 self.send_error_response(500, "Failed to add client")
                 # 修复：同上，必须回滚 add_user_connection
                 try:
-                    connection.remove_user_connection(self.username, mount_name=mount, reason="添加到转发器异常")
+                    # 按 connection_id 精确回滚，避免误删同账号其它连接
+                    connection.remove_user_connection(self.username, connection_id=connection_id, reason="添加到转发器异常")
                 except Exception as cleanup_err:
                     logger.log_error(f"add_user_connection 回滚失败: {cleanup_err}", exc_info=True)
                 return
@@ -1256,19 +1269,37 @@ a=control:*
         except Exception as e:
             logger.log_error(f"接收RTCM数据异常: {e}", exc_info=True)
         finally:
-            
+
+            # 记录本会话的 socket 引用，用于延迟清理时的「代际校验」。
+            # 修复：若 1.5 秒内同挂载点被新会话接管（基站断线后快速重连），
+            # 旧的延迟清理不得触碰新会话的缓冲区与连接，否则会关闭刚连上的
+            # 基站 socket，造成重连风暴（连上→被杀→再连→再被杀）。
+            my_socket = self.client_socket
+
             def delayed_cleanup():
-                """延迟清理函数"""
+                """延迟清理函数（带会话代际校验：只清理仍属于本会话的资源）"""
                 try:
-                    forwarder.remove_mount_buffer(mount)
+                    cm = connection.get_connection_manager()
+                    current = None
+                    try:
+                        current = cm.online_mounts.get(mount)
+                    except Exception:
+                        current = None
+                    if current is not None and getattr(current, 'client_socket', None) is not my_socket:
+                        log_info(f"挂载点 {mount} 已被新连接接管，跳过旧会话的延迟清理")
+                        return
+
+                    try:
+                        forwarder.remove_mount_buffer(mount)
+                    except Exception as e:
+                        logger.log_warning(f"清理转发器缓冲区失败: {e}", 'ntrip')
+
+                    try:
+                        connection.get_connection_manager().remove_mount_connection(mount)
+                    except Exception as e:
+                        log_warning(f"清理挂载点连接失败: {e}")
                 except Exception as e:
-                    logger.log_warning(f"清理转发器缓冲区失败: {e}", 'ntrip')
-                
-                try:
-                    connection.get_connection_manager().remove_mount_connection(mount)
-                except Exception as e:
-                    log_warning(f"清理挂载点连接失败: {e}")
-                
+                    log_warning(f"挂载点 {mount} 延迟清理异常: {e}")
 
                 logger.log_mount_operation('disconnected', mount)
                 # 改为debug级别，避免频繁日志
@@ -1582,12 +1613,17 @@ a=control:*
 
             if hasattr(self, 'username') and hasattr(self, 'mount'):
                 if hasattr(self, 'client_info'):  # 下载连接
-                    # 使用关键字参数：第二个位置本意是 IP，但旧代码把它当 connection_id 传给
-                    # remove_user_connection，IP 永远匹配不到生成的 connection_id，靠 mount_name 兜底。
-                    # 显式传 mount_name= 避免歧义。
+                    # 修复：优先按 connection_id 精确匹配，避免同一账号在该挂载点的
+                    # 其它存活连接被连坐移除（旧实现只传 mount_name）
+                    _conn_id = None
+                    try:
+                        _conn_id = self.client_info.get('connection_id')
+                    except Exception:
+                        _conn_id = None
                     connection.remove_user_connection(
                         self.username,
-                        mount_name=self.mount,
+                        connection_id=_conn_id,
+                        mount_name=None if _conn_id else self.mount,
                         reason="客户端断开",
                     )
                 else:  # 上传连接

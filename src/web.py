@@ -216,16 +216,20 @@ class WebManager:
                     return self._load_template('login.html', error=password_error)
                 
                 if self.db_manager.verify_admin(username, password):
+                    # 登录成功先重建会话，防止会话固化（session fixation）
+                    session.clear()
                     session['admin_logged_in'] = True
                     session['admin_username'] = username
-                    
+
                     # 检查重定向参数
                     redirect_page = request.args.get('redirect')
                     if redirect_page and redirect_page in ['dashboard', 'users', 'mounts', 'connection_events', 'settings', 'data_view']:
                         return redirect(f'/?page={redirect_page}')
-                    
+
                     return redirect(url_for('index'))
                 else:
+                    # 应用层防爆破延迟：拖慢在线字典/暴力破解
+                    time.sleep(1.0)
                     return self._load_template('login.html', error="用户名或密码错误")
             
             return self._load_template('login.html')
@@ -265,6 +269,8 @@ class WebManager:
                     return jsonify({'error': '用户名包含非法字符'}), 400
                 
                 if self.db_manager.verify_admin(username, password):
+                    # 登录成功先重建会话，防止会话固化（session fixation）
+                    session.clear()
                     session['admin_logged_in'] = True
                     session['admin_username'] = username
                     return jsonify({
@@ -273,6 +279,8 @@ class WebManager:
                         'token': 'session_based'  # 使用session而不是JWT
                     })
                 else:
+                    # 应用层防爆破延迟：拖慢在线字典/暴力破解
+                    time.sleep(1.0)
                     return jsonify({'error': '用户名或密码错误'}), 401
             except Exception as e:
                     log_error(f"API登录失败: {e}")
@@ -1256,6 +1264,7 @@ class WebManager:
                 return jsonify({'error': str(e)}), 500
         
         @self.app.route('/api/system/stats')
+        @self.require_login
         def api_system_stats():
             """获取系统统计数据"""
             try:
@@ -1273,6 +1282,7 @@ class WebManager:
                 return jsonify({'error': str(e)}), 500
         
         @self.app.route('/api/str-table', methods=['GET'])
+        @self.require_login
         def api_str_table():
             """获取实时STR表数据"""
             try:
@@ -1297,6 +1307,7 @@ class WebManager:
                 }), 500
         
         @self.app.route('/api/mounts/online', methods=['GET'])
+        @self.require_login
         def api_online_mounts_detailed():
             """获取详细的在线挂载点信息"""
             try:
@@ -1481,6 +1492,11 @@ class WebManager:
         def handle_connect():
             """客户端连接"""
             from flask import session
+            # 安全修复：WebSocket 握手必须校验管理员会话，否则任何访客都能
+            # 订阅 data_push 房间，周期性收到在线用户名/IP/基站坐标等敏感数据
+            if not session.get('admin_logged_in'):
+                log_web_request('websocket', 'connect', request.sid if hasattr(request, 'sid') else 'unknown', '未认证的WebSocket连接已拒绝')
+                return False  # 拒绝连接
             client_id = session.get('sid', 'unknown')
             log_web_request('websocket', 'connect', client_id, 'WebSocket客户端连接')
             # 将客户端加入到数据推送房间

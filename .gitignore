@@ -69,3 +69,9 @@ run_ntrip.sh
 start_local.sh
 quick-start.sh
 simulate_clients.py
+
+# 运行时生成的随机密钥（绝对不能入库；缺失会触发 config.py 自动重建）
+.secret_key
+# 本地测试库（勿入库）
+2rtk.db
+*.db

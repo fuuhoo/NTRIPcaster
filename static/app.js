@@ -1502,8 +1502,8 @@ function getUsersContent(connections) {
     const allMounts = [...new Set((connections || []).map(c => c.mount_name).filter(Boolean))].sort();
     const allUsernames = [...new Set((connections || []).map(c => c.username).filter(Boolean))].sort();
     
-    const mountOptions = allMounts.map(m => `<option value="${m}">${m}</option>`).join('');
-    const usernameOptions = allUsernames.map(u => `<option value="${u}">${u}</option>`).join('');
+    const mountOptions = allMounts.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+    const usernameOptions = allUsernames.map(u => `<option value="${escapeHtml(u)}">${escapeHtml(u)}</option>`).join('');
     const connectionCount = connections ? connections.length : 0;
     
     const rowsHtml = (connections || []).map(conn => {
@@ -1514,12 +1514,12 @@ function getUsersContent(connections) {
         const dataRate = formatDataRate(conn.data_rate || 0);
         const bytesSent = formatBytes(conn.bytes_sent || 0);
         return `
-            <tr data-connection-id="${conn.connection_id}" data-username="${conn.username}">
-                <td>${conn.connection_id}</td>
-                <td>${conn.username}</td>
-                <td>${conn.mount_name}</td>
-                <td>${conn.ip_address}</td>
-                <td>${conn.connect_time}</td>
+            <tr data-connection-id="${escapeHtml(conn.connection_id)}" data-username="${escapeHtml(conn.username)}">
+                <td>${escapeHtml(conn.connection_id)}</td>
+                <td>${escapeHtml(conn.username)}</td>
+                <td>${escapeHtml(conn.mount_name)}</td>
+                <td>${escapeHtml(conn.ip_address)}</td>
+                <td>${escapeHtml(conn.connect_time)}</td>
                 <td>${bytesSent}</td>
                 <td>${dataRate}</td>
                 <td class="diff-status-cell" style="color: ${ggaInfo.color}; font-weight: 600;">${ggaInfo.label}</td>
@@ -1644,9 +1644,9 @@ async function loadUserConnections(username, container) {
             const bytesSent = formatBytes(conn.bytes_sent || 0);
             return `
                 <tr>
-                    <td>${conn.mount_name || '-'}</td>
-                    <td>${conn.ip_address || '-'}</td>
-                    <td>${conn.connect_time || '-'}</td>
+                    <td>${escapeHtml(conn.mount_name || '-')}</td>
+                    <td>${escapeHtml(conn.ip_address || '-')}</td>
+                    <td>${escapeHtml(conn.connect_time || '-')}</td>
                     <td>${bytesSent}</td>
                     <td>${dataRate}</td>
                     <td style="color: ${ggaInfo.color}; font-weight: 600;">${ggaInfo.label}</td>
@@ -1699,16 +1699,17 @@ function getMountsContent(mounts) {
         const actionButtons = isAnonymous ?
             '<span style="color: #6c757d; font-size: 0.85em;">匿名</span>' :
             `
-                <button onclick="editMount('${mount.mount}')" class="btn btn-primary btn-sm">编辑</button>
-                <button onclick="deleteMount('${mount.mount}')" class="btn btn-danger btn-sm">删除</button>
+                <button onclick="editMount('${escapeHtml(mount.mount)}')" class="btn btn-primary btn-sm">编辑</button>
+                <button onclick="deleteMount('${escapeHtml(mount.mount)}')" class="btn btn-danger btn-sm">删除</button>
             `;
+        const safeMount = escapeHtml(mount.mount);
         return `
-            <tr class="mount-row" data-mount="${mount.mount}">
-                <td>${mount.mount}</td>
+            <tr class="mount-row" data-mount="${safeMount}">
+                <td>${safeMount}</td>
                 <td class="mount-status">${statusHtml}</td>
                 <td class="mount-connections">${mount.connections || 0}</td>
-                <td>${isAnonymous ? '匿名' : (mount.username || '未指定')}</td>
-                <td>${isAnonymous ? '系统自动注册' : (mount.description || '-')}</td>
+                <td>${isAnonymous ? '匿名' : escapeHtml(mount.username || '未指定')}</td>
+                <td>${isAnonymous ? '系统自动注册' : escapeHtml(mount.description || '-')}</td>
                 <td>
                     ${actionButtons}
                 </td>
@@ -2579,12 +2580,12 @@ function updateMountDetails(mounts) {
         
         return `
             <div class="mount-item">
-                <div class="mount-name">${mountName}</div>
+                <div class="mount-name">${escapeHtml(mountName)}</div>
                 <div class="mount-stats">
                     <div>👤 ${userCount} 用户</div>
             <div>📈 ${dataCount} 数据包</div>
                     <div>⏱️ ${uptimeStr}</div>
-                    <div>⚙️ ${status}</div>
+                    <div>⚙️ ${escapeHtml(status)}</div>
                 </div>
             </div>
         `;
@@ -2737,9 +2738,9 @@ function updateMonitorData() {
                 Object.entries(window.strData).forEach(([mountName, strContent]) => {
                     strHtml += `
                         <div class="str-row">
-                            <button class="str-info-btn" data-mount="${mountName}">信息</button>
+                            <button class="str-info-btn" data-mount="${escapeHtml(mountName)}">信息</button>
                             <div class="str-content-wrapper">
-                                <div class="str-content-inline">${strContent || '暂无数据'}</div>
+                                <div class="str-content-inline">${escapeHtml(strContent || '暂无数据')}</div>
                             </div>
                         </div>
                     `;
@@ -3840,9 +3841,14 @@ function renderNotificationBots(bots) {
 
 function escapeHtml(text) {
     if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    // 转义 & < > " ' ：同时覆盖文本节点与 HTML 属性上下文，
+    // 防止挂载点名 / User-Agent / IP 等用户可控数据注入页面（存储型 XSS）
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 function showAddNotificationBotForm() {

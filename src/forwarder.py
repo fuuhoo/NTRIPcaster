@@ -604,9 +604,14 @@ class SimpleDataForwarder:
                 self.stats['active_clients'] = sum(len(clients) for clients in self.clients.values())
                 self.stats['disconnected_clients'] += 1
 
+            # 修复：优先按 connection_id 精确匹配，只移除本条连接。
+            # 旧实现只传 mount_name 会命中该用户在该挂载点的全部连接，
+            # 导致同账号多设备场景下一台断线、其余设备被连坐强踢。
+            _conn_id = client_info.get('connection_id')
             connection.remove_user_connection(
                 client_info['user'],
-                mount_name=client_info['mount'],
+                connection_id=_conn_id,
+                mount_name=None if _conn_id else client_info['mount'],
                 reason=reason,
             )
             

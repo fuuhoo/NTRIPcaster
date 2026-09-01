@@ -3,6 +3,7 @@
 
 import time
 import json
+import socket
 import threading
 from threading import Lock, RLock, Thread
 from collections import defaultdict, deque
@@ -157,47 +158,18 @@ class ConnectionManager:
         self.print_active_connections()
     
     def cleanup_zombie_connections(self):
-        """清理僵尸连接 - 检查系统层面socket状态"""
-        import subprocess
-        import re
-        
-        try:
-            # 获取系统层面的socket连接状态
-            result = subprocess.run(['netstat', '-an'], capture_output=True, text=True, shell=True)
-            if result.returncode != 0:
-                log_warning("无法获取系统socket状态")
-                return
-            
-            # 解析ESTABLISHED连接
-            established_ips = set()
-            for line in result.stdout.split('\n'):
-                if ':2101' in line and 'ESTABLISHED' in line:
-                    # 提取远程IP地址
-                    match = re.search(r'(\d+\.\d+\.\d+\.\d+):(\d+)\s+ESTABLISHED', line)
-                    if match:
-                        remote_ip = match.group(1)
-                        established_ips.add(remote_ip)
-            
-            # 检查应用层连接状态
-            with self.mount_lock:
-                zombie_mounts = []
-                for mount_name, mount_info in self.online_mounts.items():
-                    if mount_info.ip_address not in established_ips:
-                        zombie_mounts.append(mount_name)
-                        log_warning(f"检测到僵尸连接: 挂载点 {mount_name}, IP {mount_info.ip_address}")
-                
-                # 清理僵尸连接
-                for mount_name in zombie_mounts:
-                    log_info(f"清理僵尸连接: {mount_name}")
-                    self.remove_mount_connection(mount_name, "僵尸连接清理")
-                
-                if zombie_mounts:
-                    log_info(f"已清理 {len(zombie_mounts)} 个僵尸连接")
-                else:
-                    log_debug("未发现僵尸连接")
-                    
-        except Exception as e:
-            log_error(f"清理僵尸连接时发生异常: {e}", exc_info=True)
+        """[已废弃] 旧的僵尸连接清理。
+
+        原实现基于 netstat 解析系统 socket 表，存在两个致命问题：
+        1. subprocess.run(['netstat','-an'], shell=True) 在 POSIX 上实际执行裸 netstat
+           （'-an' 被 shell 当作位置参数吞掉），输出格式与解析假设不符；
+        2. 正则只匹配点分 IPv4 远端地址，IPv6 客户端或主机名反解时解析结果为空，
+           会把所有在线挂载点误判为僵尸并批量强断。
+        且该函数曾被挂在每次基站上传的热路径上（handle_upload）。
+        现改为直接返回，保留空实现以防外部调用报错；半开连接的回收由
+        cleanup_stale_user_connections 的深度探测与 keep-alive/GGA reader 完成。
+        """
+        return
 
     def cleanup_stale_user_connections(self, max_idle_seconds=300, force_check=False):
         """清理空闲过久的用户连接（防止 keep-alive 未检测到的断开）
@@ -207,31 +179,41 @@ class ConnectionManager:
         mount_offline 事件永远丢失。
 
         本方法在 force_check=True 时主动探测 socket（MSG_PEEK），否则用最近活动时间判断。
+        无 socket 引用的记录不做删除（无法探测，交由正常断开流程回收）。
+        命中的连接优先经转发器标准路径清理（先从 GGA selector 注销再关 socket）。
         """
         import select as _select
-        with self.user_lock:
-            current_time = time.time()
-            stale = []  # (username, indices) 待删除
+        current_time = time.time()
 
+        # 阶段一（持 user_lock）：只做存活探测，收集待清理的连接引用。
+        # 修复：1) 补充了模块级 import socket（原代码引用 socket.MSG_PEEK 但未导入，
+        # 深度探测必抛 NameError 且不被捕获，导致每小时深度清理必然中断）；
+        # 2) 无 socket 引用的空闲记录不再无条件判死（会把健康连接误报离线）。
+        stale = []  # [(username, [conn_ref, ...])]
+        with self.user_lock:
             for username, conns in list(self.online_users.items()):
-                stale_indices = []
-                for i, conn in enumerate(conns):
+                stale_conns = []
+                for conn in conns:
                     last_activity = conn.get('last_activity', conn.get('connect_time', current_time))
                     idle_seconds = current_time - last_activity
                     if idle_seconds < max_idle_seconds:
                         continue
 
                     sock = conn.get('client_socket')
-                    should_remove = False
+                    # 无 socket 引用无法探测存活，交由正常断开流程回收
                     if sock is None:
-                        should_remove = True
-                    elif force_check:
+                        continue
+
+                    should_remove = False
+                    if force_check:
                         try:
                             r, _, _ = _select.select([sock], [], [], 0.0)
                             if r:
                                 try:
                                     data = sock.recv(1, socket.MSG_PEEK)
                                     if not data:
+                                        # 对端已发 FIN。此处不直接 close：
+                                        # GGA reader / keep-alive 随即会感知并走标准清理
                                         should_remove = True
                                 except (BlockingIOError, InterruptedError):
                                     pass
@@ -240,70 +222,113 @@ class ConnectionManager:
                         except (OSError, ValueError):
                             should_remove = True
                     if should_remove:
-                        stale_indices.append(i)
+                        stale_conns.append(conn)
 
-                if stale_indices:
-                    stale.append((username, stale_indices))
+                if stale_conns:
+                    stale.append((username, stale_conns))
 
-            cleaned = 0
-            for username, indices in stale:
-                if username not in self.online_users:
+        def _find_forwarder_client(_conn):
+            """在转发器中按 connection_id 定位对应的 client_info"""
+            try:
+                from . import forwarder as _fw_mod
+                fw = getattr(_fw_mod, 'forwarder', None)
+                if fw is None:
+                    return None, None
+                cid = _conn.get('connection_id')
+                with fw.client_lock:
+                    for clients in fw.clients.values():
+                        for ci in clients:
+                            if cid and ci.get('connection_id') == cid:
+                                return fw, ci
+                return fw, None
+            except Exception:
+                return None, None
+
+        # 阶段二（不持 user_lock）：避免 user_lock→client_lock 与转发器
+        # client_lock→user_lock 的加锁顺序相反造成潜在死锁
+        cleaned = 0
+        for username, conns in stale:
+            for conn in conns:
+                with self.user_lock:
+                    still_there = username in self.online_users and conn in self.online_users[username]
+                if not still_there:
                     continue
-                for i in reversed(indices):
-                    if i >= len(self.online_users[username]):
+
+                uptime = round(current_time - conn.get('connect_time', current_time), 1)
+
+                # 优先走转发器标准清理：先从 GGA selector 注销再关 socket，
+                # 并复用统一的统计与离线事件记录，避免绕过注销直接 close
+                # 造成 fd 复用时 register 冲突/误删他人注册
+                fw, target = _find_forwarder_client(conn)
+                if fw is not None and target is not None:
+                    try:
+                        fw.remove_client(target, reason="超时清理")
+                        cleaned += 1
                         continue
-                    conn = self.online_users[username][i]
-                    uptime = round(current_time - conn.get('connect_time', current_time), 1)
-                    # 记录离线事件（用独立 try 避免一处异常影响其他）
-                    try:
-                        notification.notify_mount_offline(
-                            conn['mount_name'],
-                            conn['ip_address'],
-                            username=username,
-                            connect_time=conn.get('connect_datetime', '未知'),
-                            uptime=uptime,
-                            reason="超时清理"
-                        )
                     except Exception as e:
-                        log_error(f"超时清理通知失败: {e}")
+                        log_error(f"超时清理走转发器失败: {e}")
+
+                # 兜底：手动登记离线事件并安全关闭 socket
+                try:
+                    notification.notify_mount_offline(
+                        conn['mount_name'],
+                        conn['ip_address'],
+                        username=username,
+                        connect_time=conn.get('connect_datetime', '未知'),
+                        uptime=uptime,
+                        reason="超时清理"
+                    )
+                except Exception as e:
+                    log_error(f"超时清理通知失败: {e}")
+                try:
+                    database.add_connection_event(
+                        event_type='mount_offline',
+                        mount_name=conn['mount_name'],
+                        username=username,
+                        ip_address=conn['ip_address'],
+                        duration=uptime,
+                        reason="超时清理",
+                        details=f"连接时间: {conn.get('connect_datetime', '未知')}, 空闲 {int(current_time - conn.get('last_activity', current_time))}s"
+                    )
+                except Exception as e:
+                    log_error(f"超时清理事件记录失败: {e}")
+
+                sock = conn.get('client_socket')
+                if sock is not None:
+                    # 先尝试从 GGA selector 注销再关闭
                     try:
-                        database.add_connection_event(
-                            event_type='mount_offline',
-                            mount_name=conn['mount_name'],
-                            username=username,
-                            ip_address=conn['ip_address'],
-                            duration=uptime,
-                            reason="超时清理",
-                            details=f"连接时间: {conn.get('connect_datetime', '未知')}, 空闲 {int(current_time - conn.get('last_activity', current_time))}s"
-                        )
+                        if fw is not None:
+                            fw._unregister_gga_socket(sock)
+                    except Exception:
+                        pass
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+
+                mname = conn.get('mount_name')
+                with self.user_lock:
+                    try:
+                        conns_list = self.online_users.get(username)
+                        if conns_list is not None and conn in conns_list:
+                            conns_list.remove(conn)
+                        if mname in self.mount_connection_count:
+                            self.mount_connection_count[mname] -= 1
+                        if username in self.user_connection_count:
+                            self.user_connection_count[username] -= 1
                     except Exception as e:
-                        log_error(f"超时清理事件记录失败: {e}")
+                        log_error(f"超时清理移除记录失败: {e}")
+                cleaned += 1
+                log_info(f"超时清理用户连接: {username}@{mname}, idle={int(current_time - conn.get('last_activity', current_time))}s")
 
-                    # 关闭 socket
-                    sock = conn.get('client_socket')
-                    if sock is not None:
-                        try:
-                            sock.close()
-                        except Exception:
-                            pass
-
-                    # 维护计数
-                    mname = conn.get('mount_name')
-                    if mname in self.mount_connection_count:
-                        self.mount_connection_count[mname] -= 1
-                    del self.online_users[username][i]
-                    if username in self.user_connection_count:
-                        self.user_connection_count[username] -= 1
-                    cleaned += 1
-                    log_info(f"超时清理用户连接: {username}@{mname}, idle={int(current_time - conn.get('last_activity', current_time))}s")
-
+            with self.user_lock:
                 if username in self.online_users and not self.online_users[username]:
                     del self.online_users[username]
-                    if username in self.user_connection_count:
+                    if username in self.user_connection_count and not self.user_connection_count[username]:
                         del self.user_connection_count[username]
 
-            if cleaned:
-                log_info(f"超时清理完成，共清理 {cleaned} 个用户连接")
+        if cleaned:
+            log_info(f"超时清理完成，共清理 {cleaned} 个用户连接")
             return cleaned
 
     def add_mount_connection(self, mount_name, ip_address, user_agent="", protocol_version="1.0", client_socket=None):
@@ -550,6 +575,15 @@ class ConnectionManager:
                     
                     if conn.get('client_socket'):
                         try:
+                            # 先尝试从 GGA selector 注销再关闭，避免已注册 fd 残留：
+                            # 新连接复用该 fd 号时会导致 register 冲突或误删他人注册
+                            try:
+                                from . import forwarder as _fw_mod
+                                _fw = getattr(_fw_mod, 'forwarder', None)
+                                if _fw is not None:
+                                    _fw._unregister_gga_socket(conn['client_socket'])
+                            except Exception:
+                                pass
                             conn['client_socket'].close()
                         except:
                             pass

@@ -202,8 +202,43 @@ LOG_BACKUP_COUNT = get_config_value('logging', 'backup_count', 5, int)  # 保留
 
 LOG_FREQUENT_STATUS = get_config_value('logging', 'log_frequent_status', False, bool)
 
-# Flask密钥 (生产环境中请修改)
-SECRET_KEY = get_config_value('security', 'secret_key', '8f4a9c2e7d1b6f3a5e8d7c9b2a4f6e3d5c8b7a9f2e4d6c8b3a5f7e9d1c2b4a6')
+# Flask密钥
+# 安全修复：旧实现使用随源码公开的硬编码默认密钥，部署若未改 config.ini，
+# 攻击者可直接离线伪造管理员会话 cookie 接管后台。
+# 现按优先级解析：环境变量 NTRIPCASTER_SECRET_KEY > config.ini 中非默认值 >
+# 自动生成强随机密钥并持久化到数据目录 .secret_key（保证重启后已有会话不失效）。
+_INSECURE_DEFAULT_SECRET = '8f4a9c2e7d1b6f3a5e8d7c9b2a4f6e3d5c8b7a9f2e4d6c8b3a5f7e9d1c2b4a6'
+
+def _resolve_secret_key():
+    import secrets as _secrets
+    env_key = (os.environ.get('NTRIPCASTER_SECRET_KEY') or '').strip()
+    if env_key:
+        return env_key
+    ini_key = (get_config_value('security', 'secret_key', '', str) or '').strip()
+    if ini_key and ini_key != _INSECURE_DEFAULT_SECRET:
+        return ini_key
+    key_file = os.path.join(os.path.dirname(os.path.abspath(DATABASE_PATH)), '.secret_key')
+    try:
+        if os.path.exists(key_file):
+            with open(key_file, 'r', encoding='utf-8') as f:
+                existing = f.read().strip()
+            if existing:
+                return existing
+        key = _secrets.token_hex(32)
+        with open(key_file, 'w', encoding='utf-8') as f:
+            f.write(key)
+        try:
+            os.chmod(key_file, 0o600)
+        except Exception:
+            pass
+        print(f"[安全] 未配置有效 secret_key（或仍为公开默认值），已生成随机密钥保存到 {key_file}")
+        return key
+    except Exception:
+        # 兜底：无法持久化时使用进程内随机密钥（重启后会话失效，但不引入可伪造密钥）
+        print("[安全] 警告：secret_key 未配置且无法持久化随机密钥，本次运行使用临时随机密钥")
+        return _secrets.token_hex(32)
+
+SECRET_KEY = _resolve_secret_key()
 FLASK_SECRET_KEY = SECRET_KEY  # Flask应用密钥
 
 # 密码哈希配置
